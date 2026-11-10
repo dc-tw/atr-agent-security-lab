@@ -173,9 +173,7 @@ async def test_dangerous_tool_pauses_and_resumes_from_human_approval() -> None:
         ]
     )
     tools = MutatingTools()
-    graph = build_agent_graph(
-        model, object(), tool_executor=tools, checkpointer=MemorySaver()
-    )
+    graph = build_agent_graph(model, object(), tool_executor=tools, checkpointer=MemorySaver())
     config = {"configurable": {"thread_id": "approval-thread"}}
     initial_events = [
         event

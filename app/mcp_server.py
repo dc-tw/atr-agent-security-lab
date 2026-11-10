@@ -34,9 +34,7 @@ async def browser_start(url: str) -> dict[str, object]:
 @mcp.tool()
 async def browser_click(session_id: str, selector: str) -> dict[str, object]:
     """Click the first matching CSS/text selector in an existing browser session."""
-    return await executor.invoke(
-        "browser_click", {"session_id": session_id, "selector": selector}
-    )
+    return await executor.invoke("browser_click", {"session_id": session_id, "selector": selector})
 
 
 @mcp.tool()

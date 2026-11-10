@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     otel_service_name: str = "ai-ops-gateway"
     otel_exporter_otlp_endpoint: str = ""
 
+    database_url: str = ""
+    database_pool_min_size: int = Field(default=1, ge=1, le=20)
+    database_pool_max_size: int = Field(default=10, ge=1, le=100)
+    database_command_timeout_seconds: float = Field(default=30.0, ge=1, le=300)
+
     llm_base_url: str = "http://localhost:11434/v1"
     llm_api_key: str = "local-only"
     llm_model: str = "qwen2.5:7b-instruct"
@@ -73,13 +78,18 @@ class Settings(BaseSettings):
     atr_max_content_chars: int = Field(default=100_000, ge=1_000, le=1_000_000)
     atr_rules_dir: str = ""
     atr_blocking_rule_ids: Annotated[list[str], NoDecode] = Field(default_factory=list)
-    atr_blocking_excluded_rule_ids: Annotated[list[str], NoDecode] = Field(
-        default_factory=list
-    )
+    atr_blocking_excluded_rule_ids: Annotated[list[str], NoDecode] = Field(default_factory=list)
     atr_findings_ttl_seconds: int = Field(default=2_592_000, ge=3_600)
     atr_findings_max_records: int = Field(default=10_000, ge=100, le=100_000)
     atr_calibration_min_reviews: int = Field(default=20, ge=1, le=10_000)
     atr_calibration_max_false_positive_rate: float = Field(default=0.05, ge=0, le=1)
+    atr_scan_retries: int = Field(default=2, ge=0, le=5)
+    atr_fingerprint_secret: str = "development-only-change-me"
+    atr_export_encryption_secret: str = "development-only-change-me"
+    atr_export_poll_seconds: float = Field(default=2.0, ge=0.1, le=60)
+    atr_export_max_attempts: int = Field(default=8, ge=1, le=50)
+    atr_jsonl_path: str = "/tmp/atr-siem.jsonl"
+    atr_webhook_allowed_hosts: Annotated[list[str], NoDecode] = Field(default_factory=list)
 
     @field_validator("playwright_allowed_domains", mode="before")
     @classmethod
@@ -100,6 +110,13 @@ class Settings(BaseSettings):
     def split_atr_rule_ids(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("atr_webhook_allowed_hosts", mode="before")
+    @classmethod
+    def split_atr_webhook_hosts(cls, value: object) -> object:
+        if isinstance(value, str):
+            return [item.strip().lower() for item in value.split(",") if item.strip()]
         return value
 
     @field_validator("content_blocked_patterns")

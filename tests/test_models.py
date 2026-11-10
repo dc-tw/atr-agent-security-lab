@@ -39,9 +39,7 @@ def test_provider_usage_is_priced_from_exact_reported_tokens() -> None:
             llm_output_cost_per_million=8.0,
         )
     )
-    usage = model._usage(
-        {"input_tokens": 1_000, "output_tokens": 500, "total_tokens": 1_500}
-    )
+    usage = model._usage({"input_tokens": 1_000, "output_tokens": 500, "total_tokens": 1_500})
     assert usage == {
         "input_tokens": 1_000,
         "output_tokens": 500,

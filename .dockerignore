@@ -4,5 +4,8 @@
 __pycache__
 .pytest_cache
 .ruff_cache
+dashboard/node_modules
+dashboard/dist
+dashboard/*.tsbuildinfo
 output
 tests

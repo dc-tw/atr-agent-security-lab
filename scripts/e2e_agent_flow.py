@@ -44,9 +44,7 @@ async def run(args: argparse.Namespace) -> int:
     if cursor != len(EXPECTED_PHASES):
         raise AssertionError(f"Unexpected phase sequence: {phases}")
     if "passed" not in evidence_validations:
-        raise AssertionError(
-            f"No successful evidence validation event: {evidence_validations}"
-        )
+        raise AssertionError(f"No successful evidence validation event: {evidence_validations}")
     print(
         json.dumps(
             {

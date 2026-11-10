@@ -127,8 +127,7 @@ async def test_goal_worker_completes_and_persists_step_memory() -> None:
     assert saved["status"] == "completed"
     assert saved["steps"][0]["status"] == "completed"
     assert (
-        saved["steps"][0]["answer"]
-        == "A sufficiently detailed result for the durable goal step."
+        saved["steps"][0]["answer"] == "A sufficiently detailed result for the durable goal step."
     )
     assert runtime.messages[-1]["model"] == "model-a"
     assert runtime.events[-1]["type"] == "goal_completed"

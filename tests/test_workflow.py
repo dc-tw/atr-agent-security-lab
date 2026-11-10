@@ -86,20 +86,21 @@ async def test_quality_failure_retries_then_completes() -> None:
     assert completed[0]["answer"] == "A sufficiently detailed verified response"
     assert completed[0]["attempts"] == 2
     assert completed[0]["evidence_validated"] is True
-    assert "".join(
-        str(event["content"])
-        for event in events
-        if event.get("type") == "draft_token"
-        and event.get("attempt") == completed[0]["attempts"]
-    ) == completed[0]["answer"]
+    assert (
+        "".join(
+            str(event["content"])
+            for event in events
+            if event.get("type") == "draft_token"
+            and event.get("attempt") == completed[0]["attempts"]
+        )
+        == completed[0]["answer"]
+    )
 
 
 @pytest.mark.asyncio
 async def test_browser_tool_is_used_when_url_is_present() -> None:
     graph = build_agent_graph(
-        FakeModel(
-            ["Useful page content provides a sufficiently detailed response [source:1]."]
-        ),
+        FakeModel(["Useful page content provides a sufficiently detailed response [source:1]."]),
         FakeScraper(),
     )
     events = [
@@ -157,9 +158,7 @@ async def test_tool_failure_retries_then_returns_transparent_fallback() -> None:
 def test_evidence_validation_rejects_number_not_present_in_source() -> None:
     source_text = "Revenue increased by 12% this quarter."
     state = initial_state("request-4", "summarize", "https://example.com", 0)
-    state["candidate"] = (
-        "The source reports that revenue increased by 21% this quarter [source:1]."
-    )
+    state["candidate"] = "The source reports that revenue increased by 21% this quarter [source:1]."
     state["tool_result"] = json.dumps(
         {
             "url": "https://example.com",
@@ -180,9 +179,7 @@ def test_evidence_validation_rejects_number_not_present_in_source() -> None:
 def test_evidence_validation_accepts_supported_number_and_provenance() -> None:
     source_text = "Revenue increased by 12% this quarter."
     state = initial_state("request-5", "summarize", "https://example.com", 0)
-    state["candidate"] = (
-        "The source reports that revenue increased by 12% this quarter [source:1]."
-    )
+    state["candidate"] = "The source reports that revenue increased by 12% this quarter [source:1]."
     state["tool_result"] = json.dumps(
         {
             "url": "https://example.com",
@@ -230,12 +227,9 @@ def test_evidence_validation_tracks_multiple_sources_and_conflicts() -> None:
         0,
         target_urls=["https://one.example", "https://two.example"],
     )
-    state["candidate"] = (
-        "One source reports 12% [source:1]. Another reports 18% [source:2]."
-    )
+    state["candidate"] = "One source reports 12% [source:1]. Another reports 18% [source:2]."
     state["tool_calls"] = [
-        {"name": "scrape_dynamic_page", "arguments": {"url": url}}
-        for url in state["target_urls"]
+        {"name": "scrape_dynamic_page", "arguments": {"url": url}} for url in state["target_urls"]
     ]
     state["tool_result"] = json.dumps(
         [

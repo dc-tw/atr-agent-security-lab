@@ -101,7 +101,7 @@ async def threat_rule_stats(request: Request) -> dict[str, Any]:
         row["title"] = str(finding.get("title", ""))
         row["severity"] = str(finding.get("severity", "unknown"))
         row["detections"] += 1
-        if finding.get("enforcement_status") == "blocked":
+        if finding.get("enforcement_status") in {"blocked", "quarantined"}:
             row["blocked"] += 1
         review_status = str(finding.get("review_status", "unreviewed"))
         if review_status in row:
@@ -110,9 +110,7 @@ async def threat_rule_stats(request: Request) -> dict[str, Any]:
     rules = []
     for row in grouped.values():
         reviewed = row["true_positive"] + row["false_positive"]
-        false_positive_rate = (
-            row["false_positive"] / reviewed if reviewed else None
-        )
+        false_positive_rate = row["false_positive"] / reviewed if reviewed else None
         row["reviewed_for_precision"] = reviewed
         row["false_positive_rate"] = false_positive_rate
         row["recommended_for_blocking"] = bool(
@@ -128,9 +126,7 @@ async def threat_rule_stats(request: Request) -> dict[str, Any]:
         "mode": "blocking" if settings.atr_blocking else "detection_only",
         "calibration": {
             "minimum_reviews": settings.atr_calibration_min_reviews,
-            "maximum_false_positive_rate": (
-                settings.atr_calibration_max_false_positive_rate
-            ),
+            "maximum_false_positive_rate": (settings.atr_calibration_max_false_positive_rate),
         },
         "sample_size": len(findings),
         "rules": rules,

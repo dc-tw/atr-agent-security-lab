@@ -29,16 +29,12 @@ def test_pii_redaction_covers_email_phone_and_identifier() -> None:
 def test_api_key_rbac_rejects_viewer_admin_action() -> None:
     settings = Settings(
         app_env="production",
-        api_keys_json=(
-            '{"viewer-key":{"subject":"reader","tenant_id":"acme","role":"viewer"}}'
-        ),
+        api_keys_json=('{"viewer-key":{"subject":"reader","tenant_id":"acme","role":"viewer"}}'),
     )
     app = create_app(settings=settings, redis_runtime=MinimalRedis())
     with TestClient(app) as client:
         listed = client.get("/v1/models", headers={"x-api-key": "viewer-key"})
-        deleted = client.delete(
-            "/v1/conversations/private", headers={"x-api-key": "viewer-key"}
-        )
+        deleted = client.delete("/v1/conversations/private", headers={"x-api-key": "viewer-key"})
         unauthenticated = client.get("/v1/models")
 
     assert listed.status_code == 200
@@ -53,9 +49,7 @@ def test_content_policy_and_request_budget_reject_before_execution() -> None:
     )
     app = create_app(graph=NeverGraph(), settings=settings, redis_runtime=MinimalRedis())
     with TestClient(app) as client:
-        blocked = client.post(
-            "/v1/agent/stream", json={"query": "perform forbidden-operation"}
-        )
+        blocked = client.post("/v1/agent/stream", json={"query": "perform forbidden-operation"})
         oversized = client.post("/v1/agent/stream", json={"query": "x" * 1_200})
 
     assert blocked.status_code == 403

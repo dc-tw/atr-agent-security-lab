@@ -4,12 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-ops-gateway"
-version = "0.1.0"
+version = "0.2.0"
 description = "Enterprise local-LLM operations and data processing gateway"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "asyncpg>=0.30,<1",
   "beautifulsoup4>=4.12,<5",
+  "cryptography>=44,<51",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
   "langchain-core>=0.3,<2",

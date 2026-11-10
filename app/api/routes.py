@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from langgraph.types import Command
 
 from app.api.schemas import AgentRequest, ApprovalDecision
+from app.core.atr_policy import active_atr_policy, apply_atr_exemptions
 from app.core.observability import metrics, observe_agent_event
 from app.core.security import authorize, redact_pii
 from app.core.threat_feedback import record_threat_findings
@@ -37,14 +38,20 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
     safe_query = redact_pii(payload.query) if settings.pii_redaction else payload.query
     request_id = str(uuid4())
     model_name = payload.model or request.app.state.model_router.default_model
+    atr_policy = await active_atr_policy(request.app.state.redis, settings, principal.tenant_id)
     input_threat_scan = await request.app.state.threat_detector.ascan(
         safe_query,
         event_type="llm_input",
         location="agent_request",
         fields={"user_input": safe_query},
+        policy=atr_policy,
     )
-    if input_threat_scan.findings:
+    input_threat_scan = await apply_atr_exemptions(
+        request.app.state.redis, principal.tenant_id, input_threat_scan
+    )
+    if input_threat_scan.findings or input_threat_scan.degraded:
         observe_agent_event(input_threat_scan.to_event(), model=model_name)
+    if input_threat_scan.findings:
         await record_threat_findings(
             request.app.state.redis,
             settings,
@@ -68,7 +75,13 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
         raise HTTPException(
             status_code=403,
             detail={
-                "error": "atr_threat_blocked",
+                "error": (
+                    "atr_quarantined"
+                    if input_threat_scan.quarantined
+                    else "atr_approval_required"
+                    if input_threat_scan.approval_required
+                    else "atr_threat_blocked"
+                ),
                 "request_id": request_id,
                 "findings": list(input_threat_scan.findings),
             },
@@ -93,6 +106,9 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
         autonomous_tool_planning=settings.autonomous_tool_planning,
         checkpointer=request.app.state.checkpointer,
         threat_detector=request.app.state.threat_detector,
+        atr_policy=atr_policy,
+        atr_runtime=request.app.state.redis,
+        atr_tenant_id=principal.tenant_id,
     )
     redis_runtime = request.app.state.redis
     max_retries = (
@@ -156,8 +172,7 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
         "target_url": str(payload.target_url) if payload.target_url else None,
         "max_retries": max_retries,
         "max_tool_rounds": payload.max_tool_rounds or settings.agent_max_tool_rounds,
-        "deadline_seconds": payload.deadline_seconds
-        or settings.agent_default_deadline_seconds,
+        "deadline_seconds": payload.deadline_seconds or settings.agent_default_deadline_seconds,
         "approved_tools": payload.approved_tools,
         "reserved_tokens": reserved_tokens,
     }
@@ -204,14 +219,14 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
                     "history_messages": len(history),
                 }
             )
-            if input_threat_scan.findings:
+            if input_threat_scan.findings or input_threat_scan.degraded:
                 await publish(input_threat_scan.to_event())
                 if redis_runtime:
                     await redis_runtime.append_audit(
                         principal.tenant_id,
                         {
                             "action": "agent.threat_detection",
-                            "status": "detected",
+                            "status": input_threat_scan.to_event()["status"],
                             "subject": principal.subject,
                             "request_id": request_id,
                             "event": input_threat_scan.to_event(),
@@ -252,9 +267,7 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
                                 "event": event,
                             },
                         )
-                    if event.get("type") == "model_usage" and isinstance(
-                        event.get("usage"), dict
-                    ):
+                    if event.get("type") == "model_usage" and isinstance(event.get("usage"), dict):
                         latest_usage = dict(event["usage"])
                         if redis_runtime:
                             await redis_runtime.save_run_state(
@@ -410,9 +423,7 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
                 assert isinstance(item, tuple)
                 persisted_id, event = item
                 sequence += 1
-                yield _sse(
-                    str(event.get("type", "message")), event, persisted_id or sequence
-                )
+                yield _sse(str(event.get("type", "message")), event, persisted_id or sequence)
         finally:
             consumer_attached.clear()
             if not redis_runtime:
@@ -471,6 +482,11 @@ async def resume_agent_run(request_id: str, request: Request) -> dict[str, objec
         autonomous_tool_planning=request.app.state.settings.autonomous_tool_planning,
         checkpointer=request.app.state.checkpointer,
         threat_detector=request.app.state.threat_detector,
+        atr_policy=await active_atr_policy(
+            runtime, request.app.state.settings, principal.tenant_id
+        ),
+        atr_runtime=runtime,
+        atr_tenant_id=principal.tenant_id,
     )
     if not await runtime.acquire_run_slot(
         principal.tenant_id,
@@ -483,9 +499,7 @@ async def resume_agent_run(request_id: str, request: Request) -> dict[str, objec
     async def resume() -> None:
         waiting = False
         latest_usage = dict(run.get("usage", {}))
-        await runtime.save_run_state(
-            request_id, {**run, "status": "running"}, principal.tenant_id
-        )
+        await runtime.save_run_state(request_id, {**run, "status": "running"}, principal.tenant_id)
         await runtime.append_audit(
             principal.tenant_id,
             {
@@ -523,9 +537,7 @@ async def resume_agent_run(request_id: str, request: Request) -> dict[str, objec
                                 "event": event,
                             },
                         )
-                    if event.get("type") == "model_usage" and isinstance(
-                        event.get("usage"), dict
-                    ):
+                    if event.get("type") == "model_usage" and isinstance(event.get("usage"), dict):
                         latest_usage = dict(event["usage"])
                         await runtime.save_run_state(
                             request_id,
@@ -663,9 +675,7 @@ async def decide_agent_approval(
             "reason": payload.reason,
         }
         await runtime.append_event(request_id, event, principal.tenant_id)
-        await runtime.save_run_state(
-            request_id, {**run, "status": "rejected"}, principal.tenant_id
-        )
+        await runtime.save_run_state(request_id, {**run, "status": "rejected"}, principal.tenant_id)
         await runtime.append_audit(
             principal.tenant_id,
             {
@@ -692,6 +702,11 @@ async def decide_agent_approval(
         autonomous_tool_planning=request.app.state.settings.autonomous_tool_planning,
         checkpointer=request.app.state.checkpointer,
         threat_detector=request.app.state.threat_detector,
+        atr_policy=await active_atr_policy(
+            runtime, request.app.state.settings, principal.tenant_id
+        ),
+        atr_runtime=runtime,
+        atr_tenant_id=principal.tenant_id,
     )
     if not await runtime.acquire_run_slot(
         principal.tenant_id,
@@ -704,9 +719,7 @@ async def decide_agent_approval(
     async def continue_after_approval() -> None:
         waiting = False
         latest_usage = dict(run.get("usage", {}))
-        await runtime.save_run_state(
-            request_id, {**run, "status": "running"}, principal.tenant_id
-        )
+        await runtime.save_run_state(request_id, {**run, "status": "running"}, principal.tenant_id)
         await runtime.append_audit(
             principal.tenant_id,
             {
@@ -744,9 +757,7 @@ async def decide_agent_approval(
                                 "event": event,
                             },
                         )
-                    if event.get("type") == "model_usage" and isinstance(
-                        event.get("usage"), dict
-                    ):
+                    if event.get("type") == "model_usage" and isinstance(event.get("usage"), dict):
                         latest_usage = dict(event["usage"])
                         await runtime.save_run_state(
                             request_id,
@@ -864,8 +875,10 @@ async def cancel_agent_run(request_id: str, request: Request) -> dict[str, objec
         raise HTTPException(status_code=409, detail="Run is already terminal")
     event = {"type": "cancelled", "request_id": request_id, "by": principal.subject}
     usage = run.get("usage", {})
-    if isinstance(usage, dict) and usage.get("provider_reported") and hasattr(
-        runtime, "reconcile_daily_tokens"
+    if (
+        isinstance(usage, dict)
+        and usage.get("provider_reported")
+        and hasattr(runtime, "reconcile_daily_tokens")
     ):
         await runtime.reconcile_daily_tokens(
             principal.tenant_id,
@@ -874,9 +887,7 @@ async def cancel_agent_run(request_id: str, request: Request) -> dict[str, objec
             request_id=request_id,
         )
     await runtime.append_event(request_id, event, principal.tenant_id)
-    await runtime.save_run_state(
-        request_id, {**run, "status": "cancelled"}, principal.tenant_id
-    )
+    await runtime.save_run_state(request_id, {**run, "status": "cancelled"}, principal.tenant_id)
     await runtime.append_audit(
         principal.tenant_id,
         {
@@ -934,15 +945,25 @@ async def replay_agent_events(request_id: str, request: Request) -> StreamingRes
 @router.get("/healthz")
 async def health(request: Request) -> dict[str, object]:
     redis_ok = None
-    if request.app.state.redis:
+    redis_runtime = getattr(request.app.state, "redis_cache", None)
+    if redis_runtime is None and request.app.state.redis:
+        redis_runtime = request.app.state.redis
+    if redis_runtime:
         try:
-            redis_ok = await request.app.state.redis.ping()
+            redis_ok = await redis_runtime.ping()
         except Exception:
             redis_ok = False
+    postgres_ok = None
+    if request.app.state.postgres:
+        try:
+            postgres_ok = await request.app.state.postgres.ping()
+        except Exception:
+            postgres_ok = False
     detector = request.app.state.threat_detector
     return {
         "status": "ok",
         "redis": redis_ok,
+        "postgres": postgres_ok,
         "atr": {
             "enabled": detector.enabled,
             "blocking": detector.blocking,
@@ -954,19 +975,35 @@ async def health(request: Request) -> dict[str, object]:
 @router.get("/readyz")
 async def readiness(request: Request) -> JSONResponse:
     redis_ok = False
-    if request.app.state.redis:
+    redis_runtime = getattr(request.app.state, "redis_cache", None)
+    if redis_runtime is None and request.app.state.redis:
+        redis_runtime = request.app.state.redis
+    if redis_runtime:
         try:
-            redis_ok = await request.app.state.redis.ping()
+            redis_ok = await redis_runtime.ping()
         except Exception:
             redis_ok = False
-    ready = bool(redis_ok) and (
-        not request.app.state.settings.langgraph_checkpointing
-        or request.app.state.checkpointer is not None
+    postgres_ok = True
+    if request.app.state.settings.database_url:
+        try:
+            postgres_ok = bool(
+                request.app.state.postgres and await request.app.state.postgres.ping()
+            )
+        except Exception:
+            postgres_ok = False
+    ready = (
+        bool(redis_ok)
+        and postgres_ok
+        and (
+            not request.app.state.settings.langgraph_checkpointing
+            or request.app.state.checkpointer is not None
+        )
     )
     return JSONResponse(
         {
             "status": "ready" if ready else "not_ready",
             "redis": bool(redis_ok),
+            "postgres": postgres_ok if request.app.state.settings.database_url else None,
             "atr_rules": request.app.state.threat_detector.rule_count,
         },
         status_code=200 if ready else 503,

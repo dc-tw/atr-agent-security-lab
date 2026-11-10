@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.api.routes import _sse
 from app.api.schemas import GoalCreateRequest
+from app.core.atr_policy import active_atr_policy, apply_atr_exemptions
 from app.core.observability import observe_agent_event
 from app.core.security import authorize, redact_pii
 from app.core.threat_feedback import record_threat_findings
@@ -46,9 +47,7 @@ async def create_goal(payload: GoalCreateRequest, request: Request) -> dict[str,
         {
             "id": str(uuid4()),
             "query": (
-                redact_pii(step.query)
-                if request.app.state.settings.pii_redaction
-                else step.query
+                redact_pii(step.query) if request.app.state.settings.pii_redaction else step.query
             ),
             "target_url": str(step.target_url) if step.target_url else None,
             "status": "pending",
@@ -57,12 +56,14 @@ async def create_goal(payload: GoalCreateRequest, request: Request) -> dict[str,
         }
         for step in payload.steps
     ]
+    atr_policy = await active_atr_policy(runtime, request.app.state.settings, principal.tenant_id)
     threat_scans = [
         await request.app.state.threat_detector.ascan(
             objective,
             event_type="llm_input",
             location="goal_objective",
             fields={"user_input": objective},
+            policy=atr_policy,
         ),
         *[
             await request.app.state.threat_detector.ascan(
@@ -70,11 +71,15 @@ async def create_goal(payload: GoalCreateRequest, request: Request) -> dict[str,
                 event_type="llm_input",
                 location=f"goal_step:{index}",
                 fields={"user_input": step["query"]},
+                policy=atr_policy,
             )
             for index, step in enumerate(steps)
         ],
     ]
-    threat_scans = [scan for scan in threat_scans if scan.findings]
+    threat_scans = [
+        await apply_atr_exemptions(runtime, principal.tenant_id, scan) for scan in threat_scans
+    ]
+    threat_scans = [scan for scan in threat_scans if scan.findings or scan.degraded]
     model_name = payload.model or request.app.state.model_router.default_model
     for scan in threat_scans:
         observe_agent_event(scan.to_event(), model=model_name)
@@ -101,7 +106,13 @@ async def create_goal(payload: GoalCreateRequest, request: Request) -> dict[str,
         raise HTTPException(
             status_code=403,
             detail={
-                "error": "atr_threat_blocked",
+                "error": (
+                    "atr_quarantined"
+                    if blocked_scan.quarantined
+                    else "atr_approval_required"
+                    if blocked_scan.approval_required
+                    else "atr_threat_blocked"
+                ),
                 "goal_id": goal_id,
                 "findings": list(blocked_scan.findings),
             },
@@ -131,7 +142,7 @@ async def create_goal(payload: GoalCreateRequest, request: Request) -> dict[str,
             principal.tenant_id,
             {
                 "action": "goal.threat_detection",
-                "status": "detected",
+                "status": scan.to_event()["status"],
                 "subject": principal.subject,
                 "goal_id": goal_id,
                 "event": scan.to_event(),

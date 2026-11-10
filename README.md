@@ -36,7 +36,11 @@ flowchart LR
     TC -. tool args / result .-> ATR
     E -. model output .-> ATR
 
-    G <-->|tenant memory / SSE replay / checkpoint / audit| RD[(Redis 8)]
+    G <-->|queue / SSE replay / checkpoint / quota| RD[(Redis 8)]
+    G <-->|conversation / run / Goal / audit / ATR| PG[(PostgreSQL 17)]
+    PG --> OB[Durable SIEM outbox]
+    OB --> SIEM[Signed webhook / JSONL]
+    UI[React ATR Control Plane] --> G
     RD --> GW[Durable Goal Worker]
     GW --> LG
     LG -. node, tool, retry, token events .-> G
@@ -58,14 +62,14 @@ flowchart LR
 - **Playwright + MCP**：Tool Registry 支援 local、MCP stdio 與內網 Browser Worker transport；
   模型可選擇工具，click/type 需要 client 明確列入 `approved_tools`。Browser Worker 具備
   session TTL、操作 lock、SSRF/redirect/allow-list 與輸出大小控制。
-- **Redis**：所有對話、run、Goal、audit key 以 tenant 分區；保存 rolling summary、相關
-  長期記憶、SSE event、LangGraph checkpoint。Goal 使用 Consumer Group、ACK、lease reclaim
-  與 dead-letter stream。
+- **PostgreSQL + Redis**：PostgreSQL 是 conversation、run、Goal、audit、ATR policy/finding/
+  receipt 的 durable system of record；Redis 只保留低延遲 SSE replay、LangGraph checkpoint、
+  quota 與 Goal queue。Goal queue 使用 Consumer Group、ACK、lease reclaim 與 dead-letter stream。
 - **安全與治理**：支援多租戶 API key、OIDC/JWKS JWT、RBAC、rate/concurrency/token quota、
   PII redaction、模型 allow-list、內容政策、checkpoint-backed human approval、取消與 deadline。
-- **Agent Threat Rules (ATR)**：載入 `pyatr` 規則，自動掃描 user/Goal input、tool call、
-  Playwright/MCP response、Goal planner 與 model output。預設為 detection-only；可依 severity
-  開啟 blocking。事件與 audit 不包含原文或命中的 regex，避免安全遙測二次洩密。
+- **Agent Threat Rules (ATR)**：tenant-versioned policy 支援 `detect`、`block`、`quarantine`、
+  `require_approval`；規則 bundle 可原子 reload/rollback。每次判定寫入 hash-chained receipt，
+  quarantine 只保存 HMAC fingerprint，不保存原文；可建立限時、單次豁免後重跑。
 - **可觀測性**：`/metrics` 提供 HTTP、TTFT、token、tool、retry、Evidence Validation、active-run 指標；
   provider 有回報 usage 時，記錄精確 input/output token 與依模型 route 設定計算的 USD 成本。
   設定 OTLP endpoint 後啟用 OpenTelemetry tracing。對外不回傳 hidden chain-of-thought。
@@ -75,13 +79,15 @@ flowchart LR
 ```text
 app/
 ├── api/                 # HTTP schema 與 SSE endpoint
-├── core/                # settings、Redis、security、observability
+├── core/                # PostgreSQL/Redis runtime、ATR、security、observability
+├── db/                  # versioned SQL migration 與 smoke test
 ├── graph/               # LangGraph state 與 workflow
 ├── llm/                 # Ollama/vLLM 共用模型 adapter
 ├── tools/               # Playwright、Tool Registry、MCP/remote transports
 ├── browser_worker.py    # 隔離 Chromium service
 ├── main.py              # FastAPI app factory
 └── mcp_server.py        # stdio MCP server
+dashboard/               # Vite + React + TypeScript ATR Control Plane
 ```
 
 ## 本機啟動
@@ -106,6 +112,8 @@ docker compose --profile vllm up --build
 ```
 
 `gateway` 不硬性依賴任一模型 container，因此也能連到外部 GPU inference cluster。
+管理台預設位於 `http://localhost:3000`；development 使用 API key，production 可貼入 OIDC
+access token，所有 API 仍由 Gateway 的 tenant/RBAC 驗證。
 
 ## SSE 呼叫
 
@@ -150,8 +158,8 @@ Prometheus 提供 `ai_gateway_threat_detections_total` 與 `ai_gateway_threat_bl
 
 ### Detection-only 校準與正式阻擋
 
-Detection-only 命中會在 Redis 保存 30 天的 privacy-safe metadata，包括 rule、severity、
-event boundary、model、request/Goal ID 與審查狀態；不保存 prompt、網頁內容或 matched regex。
+Detection-only 命中會在 PostgreSQL 保存 privacy-safe metadata，包括 rule、severity、event
+boundary、model、request/Goal ID 與審查狀態；不保存 prompt、網頁內容或 matched regex。
 安全管理者可列出 finding 並標記結果：
 
 ```bash
@@ -177,7 +185,28 @@ Rule statistics 會回傳 reviewed sample、false-positive rate 與 `recommended
 
 系統不會因統計結果自行切換 production enforcement；切換必須經設定變更與部署審核。
 
-同一個 `conversation_id` 會載入 Redis 的近期訊息、rolling summary 與相關長期記憶；
+### ATR Control Plane API
+
+```text
+GET/PUT  /v1/security/atr/policies/active
+GET      /v1/security/atr/policies
+POST     /v1/security/atr/policies/{version}/rollback
+POST     /v1/security/atr/rules/reload
+GET      /v1/security/atr/rules
+GET      /v1/security/atr/rules/bundles
+POST     /v1/security/atr/rules/bundles/{bundle_id}/rollback
+GET      /v1/security/atr/receipts
+GET      /v1/security/atr/receipts/verify
+POST     /v1/security/atr/findings/{finding_id}/exempt
+GET/POST /v1/security/atr/exports/sinks
+```
+
+Blocking policy 下 scanner 最終失敗會 fail closed；detection-only 則回報 `degraded` 並放行，
+兩者都會先依 `ATR_SCAN_RETRIES` 重試。SIEM export 使用 transactional outbox；webhook body
+以 HMAC-SHA256 簽章，JSONL 路徑由伺服器設定，delivery 支援 exponential backoff 與 stale
+claim recovery。
+
+同一個 `conversation_id` 會從 PostgreSQL 載入近期訊息、rolling summary 與相關長期記憶；
 下一輪可指定另一個 allow-listed `model`。`LLM_ROUTES_JSON` 在伺服器端把 alias 映射到
 不同 Ollama／vLLM endpoint；客戶端不能提交推理 URL 或任意模型名稱。
 
@@ -235,7 +264,8 @@ Session 有 TTL 與數量上限，輸入/點擊只接受 selector，不提供任
 
 ## Durable Goal Mode
 
-Goal state、步驟與事件保存在 Redis，由 Compose 中獨立的 `worker` 執行。未提供 `steps`
+Goal state 與步驟保存在 PostgreSQL；Redis 保存 queue、SSE event 與 checkpoint，由 Compose
+中獨立的 `worker` 執行。未提供 `steps`
 時，worker 會要求選定模型拆解成有限步驟；也可由呼叫端明確指定可稽核的步驟。
 
 ```bash
@@ -289,6 +319,7 @@ kubectl apply -k deploy/kubernetes
 ruff check .
 pytest -q
 docker compose config
+npm --prefix dashboard run build
 ```
 
 ### 1. 真實 Playwright smoke test
@@ -345,7 +376,7 @@ python scripts/chaos_tool_failure.py --max-retries 2
 sh scripts/test_docker_stack.sh
 ```
 
-它會啟動 Redis 8、mock inference、Gateway、Goal Worker 與隔離 Browser Worker，驗證模型
+它會啟動 PostgreSQL 17、Redis 8、mock inference、Gateway、Goal Worker 與隔離 Browser Worker，驗證模型
 內網、conversation memory、Goal、checkpoint key、Consumer Group ACK、Browser Worker
 contract、metrics，以及 SIGKILL Gateway 後的 checkpoint resume。
 
@@ -357,6 +388,19 @@ sh scripts/test_ollama_stack.sh
 ```
 
 兩個腳本預設都會清理自己建立的容器；設定 `KEEP_STACK=1` 可保留現場供除錯。
+
+### 6. ATR corpus、效能與完整 demo
+
+```bash
+python scripts/evaluate_atr_corpus.py
+python scripts/benchmark_atr.py --iterations 200 --max-p95-ms 50
+python scripts/demo_atr.py --base-url http://localhost:8000 --api-key ADMIN_KEY
+docker compose run --rm migrate python -m app.db.smoke
+```
+
+Corpus 同時覆蓋 LLM input、tool response 與 model output 的惡意／正常樣本；benchmark 會對
+目前掛載的完整 bundled rules 執行本機 p95 gate。Demo 會實際切換 detection-only/blocking、觸發
+quarantine、建立一次性豁免、重跑、校準 finding 並驗證 receipt chain。
 
 ## 已知邊界
 

@@ -9,3 +9,6 @@ deploy/kubernetes/secret.yaml
 .coverage
 htmlcov/
 .DS_Store
+dashboard/node_modules/
+dashboard/dist/
+dashboard/*.tsbuildinfo

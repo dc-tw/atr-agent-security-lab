@@ -41,6 +41,4 @@ class GoalCreateRequest(BaseModel):
 
 class GoalControlResponse(BaseModel):
     goal_id: str
-    status: Literal[
-        "queued", "running", "pausing", "paused", "completed", "failed", "cancelled"
-    ]
+    status: Literal["queued", "running", "pausing", "paused", "completed", "failed", "cancelled"]

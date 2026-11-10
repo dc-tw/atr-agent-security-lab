@@ -1,6 +1,28 @@
 name: ai-ops-gateway
 
 services:
+  dashboard:
+    image: ai-ops-gateway-dashboard:local
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports:
+      - "3000:8080"
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+      - /tmp
+    networks: [backend]
+
   gateway:
     image: ai-ops-gateway:local
     build:
@@ -13,16 +35,22 @@ services:
         required: false
     environment:
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
       LLM_API_KEY: ${LLM_API_KEY:-local-only}
       LLM_MODEL: ${LLM_MODEL:-qwen2.5:7b-instruct}
       BROWSER_WORKER_URL: http://browser:8010
       BROWSER_WORKER_TOKEN: ${BROWSER_WORKER_TOKEN:-change-me-internal}
+      ATR_JSONL_PATH: /var/log/ai-gateway/atr-siem.jsonl
     ports:
       - "8000:8000"
     depends_on:
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      siem-init:
+        condition: service_completed_successfully
       browser:
         condition: service_healthy
     restart: unless-stopped
@@ -32,6 +60,8 @@ services:
       - ALL
     read_only: true
     tmpfs: [/tmp]
+    volumes:
+      - siem-data:/var/log/ai-gateway
     pids_limit: 256
     mem_limit: 1g
     cpus: 2
@@ -47,6 +77,7 @@ services:
         required: false
     environment:
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
       LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
       LLM_API_KEY: ${LLM_API_KEY:-local-only}
       LLM_MODEL: ${LLM_MODEL:-qwen2.5:7b-instruct}
@@ -55,6 +86,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       browser:
         condition: service_healthy
     restart: unless-stopped
@@ -120,6 +153,61 @@ services:
     cpus: 1
     networks: [backend]
 
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway}
+      POSTGRES_DB: ${POSTGRES_DB:-gateway}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    mem_limit: 1g
+    cpus: 1
+    networks: [backend]
+
+  migrate:
+    image: ai-ops-gateway:local
+    build:
+      context: .
+      args:
+        INSTALL_BROWSER: "false"
+    command: ["python", "-m", "app.db.migrate"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs: [/tmp]
+    networks: [backend]
+
+  siem-init:
+    image: alpine:3.22
+    command: ["sh", "-ec", "chown 10001:10001 /siem && chmod 0750 /siem"]
+    volumes:
+      - siem-data:/siem
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - FOWNER
+    read_only: true
+    networks: [backend]
+
   # CPU / Apple Silicon friendly local model profile.
   ollama:
     image: ollama/ollama:0.12.3
@@ -177,6 +265,8 @@ services:
 
 volumes:
   redis-data:
+  postgres-data:
+  siem-data:
   ollama-data:
   huggingface-cache:
 

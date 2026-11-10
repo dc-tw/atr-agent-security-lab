@@ -6,9 +6,12 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
+from app.core.atr_policy import active_atr_policy, apply_atr_exemptions
 from app.core.config import get_settings
 from app.core.observability import observe_agent_event
+from app.core.postgres_runtime import PostgresRuntime
 from app.core.redis_runtime import RedisRuntime
+from app.core.runtime import GatewayRuntime
 from app.core.threat_detection import ThreatBlockedError, ThreatDetector
 from app.core.threat_feedback import record_threat_findings
 from app.graph.workflow import build_agent_graph, initial_state
@@ -51,7 +54,7 @@ async def _plan_steps(goal: dict[str, Any], router: ModelRouter) -> list[dict[st
 
 async def execute_goal(
     goal_id: str,
-    runtime: RedisRuntime,
+    runtime: Any,
     router: ModelRouter,
     scraper: BrowserScraper,
     *,
@@ -68,6 +71,7 @@ async def execute_goal(
         return
     goal["status"] = "running"
     goal["updated_at"] = _now()
+    atr_policy = await active_atr_policy(runtime, get_settings(), tenant_id)
     await runtime.save_goal(goal_id, goal, tenant_id)
     await runtime.append_goal_event(
         goal_id, {"type": "goal_status", "status": "running"}, tenant_id
@@ -83,8 +87,10 @@ async def execute_goal(
                         event_type="llm_output",
                         location=f"goal_planner_step:{index}",
                         fields={"agent_output": step["query"]},
+                        policy=atr_policy,
                     )
-                    if scan.findings:
+                    scan = await apply_atr_exemptions(runtime, tenant_id, scan)
+                    if scan.findings or scan.degraded:
                         await record_threat_findings(
                             runtime,
                             get_settings(),
@@ -93,9 +99,7 @@ async def execute_goal(
                             context_id=goal_id,
                             model=goal["model"],
                         )
-                        await runtime.append_goal_event(
-                            goal_id, scan.to_event(), tenant_id
-                        )
+                        await runtime.append_goal_event(goal_id, scan.to_event(), tenant_id)
                     if scan.blocked:
                         raise ThreatBlockedError(scan)
             await runtime.save_goal(goal_id, goal, tenant_id)
@@ -143,18 +147,25 @@ async def execute_goal(
                 checkpointer=checkpointer,
                 tool_executor=tool_executor,
                 threat_detector=threat_detector,
+                atr_policy=atr_policy,
+                atr_runtime=runtime,
+                atr_tenant_id=tenant_id,
             )
             completed: dict[str, Any] | None = None
-            graph_input = None if resume_checkpoint else initial_state(
-                request_id,
-                step["query"],
-                step.get("target_url"),
-                goal["max_retries"],
-                conversation_id=goal_id,
-                model=goal["model"],
-                conversation_history=history,
-                context_max_tokens=context_max_tokens,
-                max_tool_rounds=int(goal.get("max_tool_rounds", 8)),
+            graph_input = (
+                None
+                if resume_checkpoint
+                else initial_state(
+                    request_id,
+                    step["query"],
+                    step.get("target_url"),
+                    goal["max_retries"],
+                    conversation_id=goal_id,
+                    model=goal["model"],
+                    conversation_history=history,
+                    context_max_tokens=context_max_tokens,
+                    max_tool_rounds=int(goal.get("max_tool_rounds", 8)),
+                )
             )
             async with asyncio.timeout(float(goal.get("step_deadline_seconds", 300))):
                 async for event in graph.astream(
@@ -253,7 +264,7 @@ async def execute_goal(
         )
 
 
-async def recover_goals(runtime: RedisRuntime) -> None:
+async def recover_goals(runtime: Any) -> None:
     for tenant_id in await runtime.list_goal_tenants():
         for goal_id in await runtime.list_goal_ids(tenant_id):
             goal = await runtime.get_goal(goal_id, tenant_id)
@@ -272,7 +283,17 @@ async def recover_goals(runtime: RedisRuntime) -> None:
 
 async def main() -> None:
     settings = get_settings()
-    runtime = RedisRuntime(settings.redis_url, settings.redis_stream_maxlen)
+    redis_runtime = RedisRuntime(settings.redis_url, settings.redis_stream_maxlen)
+    runtime: Any = redis_runtime
+    if settings.database_url:
+        postgres = PostgresRuntime(
+            settings.database_url,
+            min_size=settings.database_pool_min_size,
+            max_size=settings.database_pool_max_size,
+            command_timeout=settings.database_command_timeout_seconds,
+        )
+        await postgres.connect()
+        runtime = GatewayRuntime(postgres, redis_runtime)
     router = ModelRouter(settings)
     scraper = BrowserScraper(settings)
     threat_detector = ThreatDetector.from_settings(settings)

@@ -4,11 +4,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.atr_routes import router as atr_router
 from app.api.routes import router
 from app.api.security_routes import router as security_router
+from app.core.atr_rules import rule_bundle_manifest
 from app.core.config import Settings, get_settings
 from app.core.observability import install_observability
+from app.core.postgres_runtime import PostgresRuntime
 from app.core.redis_runtime import RedisRuntime
+from app.core.runtime import GatewayRuntime
+from app.core.siem_export import SIEMExporter, run_siem_exporter
 from app.core.threat_detection import ThreatDetector
 from app.goals import router as goals_router
 from app.llm.client import ModelRouter
@@ -50,16 +55,51 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
         app.state.active_run_ids = set()
         app.state.active_run_tasks = {}
         app.state.redis = redis_runtime
+        app.state.redis_cache = None
+        app.state.postgres = None
+        app.state.siem_exporter = None
+        app.state.siem_export_task = None
         if app.state.redis is None:
             candidate = RedisRuntime(app_settings.redis_url, app_settings.redis_stream_maxlen)
             try:
                 await candidate.ping()
-                app.state.redis = candidate
+                app.state.redis_cache = candidate
             except Exception:
                 await candidate.close()
-                app.state.redis = None
+                candidate = None
+            if candidate is not None and app_settings.database_url:
+                postgres = PostgresRuntime(
+                    app_settings.database_url,
+                    min_size=app_settings.database_pool_min_size,
+                    max_size=app_settings.database_pool_max_size,
+                    command_timeout=app_settings.database_command_timeout_seconds,
+                )
+                try:
+                    await postgres.connect()
+                    await postgres.ping()
+                except Exception:
+                    await postgres.close()
+                    await candidate.close()
+                    raise
+                app.state.postgres = postgres
+                app.state.redis = GatewayRuntime(postgres, candidate)
+                await app.state.redis.activate_atr_rule_bundle(
+                    rule_bundle_manifest(app.state.threat_detector, app_settings.atr_rules_dir),
+                    activated_by="gateway-startup",
+                )
+                app.state.siem_exporter = SIEMExporter(app.state.redis, app_settings)
+                app.state.siem_export_task = asyncio.create_task(
+                    run_siem_exporter(
+                        app.state.siem_exporter,
+                        app_settings.atr_export_poll_seconds,
+                    )
+                )
+            else:
+                app.state.redis = candidate
+        elif isinstance(app.state.redis, RedisRuntime):
+            app.state.redis_cache = app.state.redis
         app.state.checkpointer = None
-        if app_settings.langgraph_checkpointing and isinstance(app.state.redis, RedisRuntime):
+        if app_settings.langgraph_checkpointing and app.state.redis_cache is not None:
             from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 
             checkpointer = AsyncRedisSaver(
@@ -76,6 +116,12 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
         if app.state.checkpointer:
             with contextlib.suppress(Exception):
                 await app.state.checkpointer.__aexit__(None, None, None)
+        if app.state.siem_export_task:
+            app.state.siem_export_task.cancel()
+            await asyncio.gather(app.state.siem_export_task, return_exceptions=True)
+        if app.state.siem_exporter:
+            with contextlib.suppress(Exception):
+                await app.state.siem_exporter.close()
         if app.state.redis:
             with contextlib.suppress(Exception):
                 await app.state.redis.close()
@@ -87,10 +133,11 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
 
     app = FastAPI(
         title="AI Operations Gateway",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
     app.include_router(router)
+    app.include_router(atr_router)
     app.include_router(security_router)
     app.include_router(goals_router)
     install_observability(app, app_settings)

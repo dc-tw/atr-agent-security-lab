@@ -46,9 +46,7 @@ metrics = Metrics()
 
 
 def normalize_path(path: str) -> str:
-    return re.sub(
-        r"[0-9a-f]{8}-[0-9a-f-]{27,}", "{id}", path, flags=re.IGNORECASE
-    )
+    return re.sub(r"[0-9a-f]{8}-[0-9a-f-]{27,}", "{id}", path, flags=re.IGNORECASE)
 
 
 def observe_agent_event(event: dict[str, Any], *, model: str) -> None:
@@ -104,9 +102,27 @@ def observe_agent_event(event: dict[str, Any], *, model: str) -> None:
                         severity=str(finding.get("severity", "unknown")),
                         event_type=str(event.get("event_type", "unknown")),
                     )
-        if event.get("status") == "blocked":
+                    metrics.inc(
+                        "ai_gateway_threat_actions_total",
+                        model=model,
+                        action=str(finding.get("action", "detect")),
+                        event_type=str(event.get("event_type", "unknown")),
+                    )
+        metrics.inc(
+            "ai_gateway_threat_scan_duration_seconds_sum",
+            float(event.get("duration_ms", 0)) / 1_000,
+            event_type=str(event.get("event_type", "unknown")),
+        )
+        if event.get("status") in {"blocked", "quarantined", "approval_required"}:
             metrics.inc(
                 "ai_gateway_threat_blocks_total",
+                model=model,
+                event_type=str(event.get("event_type", "unknown")),
+                action=str(event.get("status")),
+            )
+        if event.get("degraded"):
+            metrics.inc(
+                "ai_gateway_threat_degraded_total",
                 model=model,
                 event_type=str(event.get("event_type", "unknown")),
             )
@@ -147,9 +163,7 @@ def install_observability(app: FastAPI, settings: Any) -> None:
             resource=Resource.create({"service.name": settings.otel_service_name})
         )
         provider.add_span_processor(
-            BatchSpanProcessor(
-                OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint)
-            )
+            BatchSpanProcessor(OTLPSpanExporter(endpoint=settings.otel_exporter_otlp_endpoint))
         )
         trace.set_tracer_provider(provider)
         FastAPIInstrumentor.instrument_app(app)
