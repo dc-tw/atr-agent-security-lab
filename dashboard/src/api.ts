@@ -6,6 +6,7 @@ export type Finding = {
 export type Policy = {
   version: number; mode: "detection_only" | "blocking"; minimum_severity: string;
   block_severity: string; action_map: Record<string, string>;
+  boundary_action_map: Record<string, Record<string, string>>;
   enabled_rule_ids: string[]; excluded_rule_ids: string[];
 };
 

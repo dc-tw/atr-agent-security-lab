@@ -19,6 +19,7 @@ from app.goals import router as goals_router
 from app.llm.client import ModelRouter
 from app.tools.browser import BrowserScraper, BrowserSessionManager
 from app.tools.registry import (
+    ATRLabToolExecutor,
     LocalBrowserToolExecutor,
     MCPBrowserToolExecutor,
     RemoteBrowserScraper,
@@ -34,9 +35,18 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
         app.state.settings = app_settings
         app.state.model_router = ModelRouter(app_settings)
         app.state.threat_detector = ThreatDetector.from_settings(app_settings)
+        app.state.atr_bundle_manifest = rule_bundle_manifest(
+            app.state.threat_detector, app_settings.atr_rules_dir
+        )
         app.state.scraper = BrowserScraper(app_settings)
         app.state.browser_sessions = BrowserSessionManager(app_settings)
-        if app_settings.browser_worker_url:
+        if app_settings.atr_lab_mode:
+            app.state.tool_executor = ATRLabToolExecutor(
+                app_settings.atr_lab_fixture_url,
+                app_settings.atr_lab_deployment_url,
+                app_settings.atr_lab_internal_token,
+            )
+        elif app_settings.browser_worker_url:
             remote = RemoteBrowserToolExecutor(
                 app_settings.browser_worker_url,
                 app_settings.browser_worker_token,
@@ -84,8 +94,7 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
                 app.state.postgres = postgres
                 app.state.redis = GatewayRuntime(postgres, candidate)
                 await app.state.redis.activate_atr_rule_bundle(
-                    rule_bundle_manifest(app.state.threat_detector, app_settings.atr_rules_dir),
-                    activated_by="gateway-startup",
+                    app.state.atr_bundle_manifest, activated_by="gateway-startup"
                 )
                 app.state.siem_exporter = SIEMExporter(app.state.redis, app_settings)
                 app.state.siem_export_task = asyncio.create_task(
@@ -133,7 +142,7 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
 
     app = FastAPI(
         title="AI Operations Gateway",
-        version="0.2.0",
+        version="0.2.0-atr-lab" if app_settings.atr_lab_mode else "0.2.0",
         lifespan=lifespan,
     )
     app.include_router(router)

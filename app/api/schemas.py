@@ -21,8 +21,15 @@ class AgentRequest(BaseModel):
 
 
 class ApprovalDecision(BaseModel):
-    approved: bool
+    approval_id: str | None = Field(default=None, min_length=16, max_length=128)
+    kind: Literal["atr", "tool"] | None = None
+    decision: Literal["approve", "reject"] | None = None
+    approved: bool | None = None
     reason: str = Field(default="", max_length=500)
+
+    @property
+    def is_approved(self) -> bool:
+        return self.decision == "approve" if self.decision is not None else self.approved is True
 
 
 class GoalStepRequest(BaseModel):

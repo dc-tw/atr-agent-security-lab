@@ -16,8 +16,12 @@ def test_security_corpus_has_no_known_false_negatives_or_false_positives() -> No
     for case in _cases():
         boundary = case["boundary"]
         field = {
+            "request_input": "user_input",
             "llm_input": "user_input",
+            "planner_output": "planner_output",
+            "tool_call": "tool_args",
             "tool_response": "tool_response",
+            "model_output": "agent_output",
             "llm_output": "agent_output",
         }[boundary]
         scan = detector.scan(

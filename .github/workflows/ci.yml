@@ -20,6 +20,9 @@ jobs:
       - run: ruff check .
       - run: pytest -q
       - run: docker compose config --quiet
+      - run: docker compose -f docker-compose.atr-lab.yml config --quiet
+      - run: python scripts/evaluate_atr_corpus.py
+      - run: python scripts/benchmark_atr.py --iterations 200 --max-p95-ms 50
       - name: Validate Kubernetes YAML
         run: python -c "from pathlib import Path; import yaml; docs=sum((list(yaml.safe_load_all(p.read_text())) for p in Path('deploy/kubernetes').glob('*.yaml')), []); assert all(isinstance(d, dict) for d in docs)"
 
@@ -29,3 +32,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sh scripts/test_docker_stack.sh
+
+  atr-lab-mock-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: docker compose -f docker-compose.atr-lab.yml up -d --build --wait
+      - run: python scripts/verify_atr_lab.py
+      - if: always()
+        run: docker compose -f docker-compose.atr-lab.yml logs --no-color > atr-lab-compose.log
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atr-lab-evidence
+          path: |
+            artifacts/atr-lab
+            atr-lab-compose.log

@@ -12,3 +12,5 @@ htmlcov/
 dashboard/node_modules/
 dashboard/dist/
 dashboard/*.tsbuildinfo
+artifacts/atr-lab/*
+!artifacts/atr-lab/.gitkeep

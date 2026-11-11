@@ -141,6 +141,29 @@ class PostgresRuntime:
         )
         return _object(value) if value is not None else None
 
+    async def list_pending_agent_approvals(
+        self, tenant_id: str = "default", limit: int = 100
+    ) -> list[dict[str, Any]]:
+        rows = await self.pool.fetch(
+            """
+            SELECT request_id, model, updated_at, state->'pending_approval' AS approval
+            FROM agent_runs
+            WHERE tenant_id=$1 AND status='waiting_approval'
+            ORDER BY updated_at DESC LIMIT $2
+            """,
+            tenant_id,
+            limit,
+        )
+        return [
+            {
+                "request_id": str(row["request_id"]),
+                "model": str(row["model"]),
+                "updated_at": row["updated_at"].isoformat(),
+                **(_object(row["approval"]) or {}),
+            }
+            for row in rows
+        ]
+
     async def get_conversation(
         self, conversation_id: str, limit: int = 40, tenant_id: str = "default"
     ) -> list[dict[str, str]]:
@@ -511,6 +534,20 @@ class PostgresRuntime:
         await connection.execute(
             "SELECT pg_advisory_xact_lock(hashtext($1))", f"receipt:{tenant_id}"
         )
+        existing = await connection.fetchrow(
+            """
+            SELECT * FROM atr_enforcement_receipts
+            WHERE tenant_id=$1 AND finding_id=$2::uuid AND decision=$3
+              AND correlation_id=$4
+            ORDER BY sequence DESC LIMIT 1
+            """,
+            tenant_id,
+            finding_id,
+            decision,
+            correlation_id,
+        )
+        if existing is not None:
+            return _record(existing) or {}
         previous = await connection.fetchrow(
             """
             SELECT sequence, receipt_hash FROM atr_enforcement_receipts
@@ -859,6 +896,7 @@ class PostgresRuntime:
         if base is None:
             return None
         base["action_map"] = _object(base.get("action_map"))
+        base["boundary_action_map"] = _object(base.get("boundary_action_map"))
         base["mode"] = str(base["mode"])
         base["enabled_rule_ids"] = list(base.get("enabled_rule_ids") or [])
         base["excluded_rule_ids"] = list(base.get("excluded_rule_ids") or [])
@@ -914,9 +952,9 @@ class PostgresRuntime:
                 """
                 INSERT INTO atr_policy_versions(
                     policy_id, tenant_id, version, mode, minimum_severity,
-                    block_severity, action_map, enabled_rule_ids,
+                    block_severity, action_map, boundary_action_map, enabled_rule_ids,
                     excluded_rule_ids, active, created_by
-                ) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,true,$10)
+                ) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,true,$11)
                 RETURNING *
                 """,
                 policy_id,
@@ -926,6 +964,7 @@ class PostgresRuntime:
                 policy["minimum_severity"],
                 policy["block_severity"],
                 _json(policy["action_map"]),
+                _json(policy["boundary_action_map"]),
                 policy.get("enabled_rule_ids", []),
                 policy.get("excluded_rule_ids", []),
                 created_by,
@@ -956,6 +995,7 @@ class PostgresRuntime:
                 "minimum_severity": policy["minimum_severity"],
                 "block_severity": policy["block_severity"],
                 "action_map": policy["action_map"],
+                "boundary_action_map": policy["boundary_action_map"],
                 "enabled_rule_ids": policy["enabled_rule_ids"],
                 "excluded_rule_ids": policy["excluded_rule_ids"],
             },
@@ -1075,7 +1115,7 @@ class PostgresRuntime:
     ) -> dict[str, Any] | None:
         finding = await self.pool.fetchrow(
             """
-            SELECT rule_id, boundary, content_fingerprint
+            SELECT rule_id, boundary, content_fingerprint, bundle_checksum, policy_version
             FROM atr_findings WHERE tenant_id=$1 AND finding_id=$2::uuid
             """,
             tenant_id,
@@ -1087,8 +1127,9 @@ class PostgresRuntime:
             """
             INSERT INTO atr_exemptions(
                 exemption_id, tenant_id, finding_id, rule_id, boundary,
-                content_fingerprint, remaining_uses, expires_at, created_by
-            ) VALUES($1,$2,$3::uuid,$4,$5,$6,1,$7,$8)
+                content_fingerprint, bundle_checksum, policy_version,
+                remaining_uses, expires_at, created_by
+            ) VALUES($1,$2,$3::uuid,$4,$5,$6,$7,$8,1,$9,$10)
             RETURNING *
             """,
             uuid4(),
@@ -1097,6 +1138,8 @@ class PostgresRuntime:
             finding["rule_id"],
             finding["boundary"],
             finding["content_fingerprint"],
+            finding["bundle_checksum"],
+            finding["policy_version"],
             expires_at,
             created_by,
         )
@@ -1110,6 +1153,8 @@ class PostgresRuntime:
         rule_id: str,
         boundary: str,
         content_fingerprint: str,
+        bundle_checksum: str | None,
+        policy_version: int,
     ) -> bool:
         async with self.pool.acquire() as connection, connection.transaction():
             row = await connection.fetchrow(
@@ -1117,6 +1162,8 @@ class PostgresRuntime:
                 SELECT exemption_id FROM atr_exemptions
                 WHERE tenant_id=$1 AND rule_id=$2 AND boundary=$3
                   AND content_fingerprint=$4 AND remaining_uses > 0
+                  AND bundle_checksum IS NOT DISTINCT FROM $5
+                  AND policy_version IS NOT DISTINCT FROM $6
                   AND expires_at > now()
                 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
                 """,
@@ -1124,6 +1171,8 @@ class PostgresRuntime:
                 rule_id,
                 boundary,
                 content_fingerprint,
+                bundle_checksum,
+                policy_version,
             )
             if row is None:
                 return False

@@ -11,6 +11,28 @@ from uuid import uuid4
 from pyatr import AgentEvent, ATREngine
 
 SEVERITY_RANK = {"informational": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+ATR_BOUNDARIES = (
+    "request_input",
+    "planner_output",
+    "tool_call",
+    "tool_response",
+    "model_output",
+)
+BOUNDARY_ALIASES = {
+    "llm_input": "request_input",
+    "llm_output": "model_output",
+}
+ALLOWED_BOUNDARY_ACTIONS = {
+    "request_input": frozenset({"detect", "block"}),
+    "planner_output": frozenset({"detect", "block"}),
+    "tool_call": frozenset({"detect", "block", "require_approval"}),
+    "tool_response": frozenset({"detect", "block", "quarantine"}),
+    "model_output": frozenset({"detect", "block"}),
+}
+
+
+def canonical_boundary(event_type: str) -> str:
+    return BOUNDARY_ALIASES.get(event_type, event_type)
 
 
 @dataclass(frozen=True)
@@ -26,7 +48,16 @@ class ThreatScan:
     error: str = ""
     duration_ms: float = 0.0
 
-    def to_event(self) -> dict[str, Any]:
+    def to_event(self, *, released_before_scan: bool = False) -> dict[str, Any]:
+        actions = sorted({str(item.get("action", "detect")) for item in self.findings})
+        policy_versions = {
+            int(item.get("policy_version", 0))
+            for item in self.findings
+            if item.get("policy_version")
+        }
+        bundle_checksums = {
+            str(item["bundle_checksum"]) for item in self.findings if item.get("bundle_checksum")
+        }
         return {
             "type": "threat_detection",
             "status": (
@@ -41,13 +72,21 @@ class ThreatScan:
                 else "detected"
             ),
             "event_type": self.event_type,
+            "boundary": canonical_boundary(self.event_type),
             "location": self.location,
             "finding_count": len(self.findings),
             "findings": list(self.findings),
+            "finding_ids": [str(item["finding_id"]) for item in self.findings],
+            "action": actions[0] if len(actions) == 1 else "mixed" if actions else "detect",
+            "policy_version": next(iter(policy_versions)) if len(policy_versions) == 1 else None,
+            "bundle_checksum": (
+                next(iter(bundle_checksums)) if len(bundle_checksums) == 1 else None
+            ),
             "truncated": self.truncated,
             "approval_required": self.approval_required,
             "quarantined": self.quarantined,
             "degraded": self.degraded,
+            "released_before_scan": released_before_scan,
             **({"error": self.error} if self.error else {}),
             "duration_ms": round(self.duration_ms, 3),
         }
@@ -160,7 +199,12 @@ class ThreatDetector:
         excluded_rule_ids = frozenset(
             (policy or {}).get("excluded_rule_ids", self.blocking_excluded_rule_ids)
         )
-        action_map = dict((policy or {}).get("action_map", {}))
+        boundary = canonical_boundary(event_type)
+        boundary_maps = (policy or {}).get("boundary_action_map", {})
+        boundary_map = (
+            dict(boundary_maps.get(boundary, {})) if isinstance(boundary_maps, dict) else {}
+        )
+        action_map = boundary_map or dict((policy or {}).get("action_map", {}))
         content_fingerprint = hmac.new(
             self._fingerprint_secret,
             str(content).encode(),
@@ -185,6 +229,8 @@ class ThreatDetector:
                 and (not enabled_rule_ids or match.rule_id in enabled_rule_ids)
                 else "detect"
             )
+            if action not in ALLOWED_BOUNDARY_ACTIONS.get(boundary, frozenset({"detect"})):
+                action = "block"
             enforcement_status = {
                 "detect": "detected",
                 "block": "blocked",
@@ -205,12 +251,11 @@ class ThreatDetector:
                     "content_length": len(str(content)),
                     "policy_version": int((policy or {}).get("version", 0)),
                     "bundle_checksum": self.bundle_checksum,
+                    "boundary": boundary,
                 }
             )
         findings = tuple(findings_list)
-        blocked = any(
-            item["action"] in {"block", "quarantine", "require_approval"} for item in findings
-        )
+        blocked = any(item["action"] == "block" for item in findings)
         approval_required = any(item["action"] == "require_approval" for item in findings)
         quarantined = any(item["action"] == "quarantine" for item in findings)
         return ThreatScan(

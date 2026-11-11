@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
-from app.core.threat_detection import ThreatDetector
+from app.core.threat_detection import ThreatBlockedError, ThreatDetector
 from app.graph.workflow import build_agent_graph, initial_state
 from app.main import create_app
 from app.tools.registry import ToolSpec
@@ -116,13 +116,13 @@ async def test_blocking_mode_does_not_stream_unscanned_model_output() -> None:
     graph = build_agent_graph(
         InjectedOutputModel(), object(), threat_detector=detector(blocking=True)
     )
-    events = [
-        event
+    events = []
+    with pytest.raises(ThreatBlockedError):
         async for event in graph.astream(
             initial_state("threat-output-1", "Answer safely", None, 0),
             stream_mode="custom",
-        )
-    ]
+        ):
+            events.append(event)
 
     assert not [event for event in events if event.get("type") == "draft_token"]
     threat = next(event for event in events if event.get("type") == "threat_detection")
@@ -138,8 +138,8 @@ async def test_langgraph_scans_and_blocks_untrusted_tool_response() -> None:
         tool_executor=InjectedPageTool(),
         threat_detector=detector(blocking=True),
     )
-    events = [
-        event
+    events = []
+    with pytest.raises(ThreatBlockedError):
         async for event in graph.astream(
             initial_state(
                 "threat-tool-1",
@@ -148,18 +148,17 @@ async def test_langgraph_scans_and_blocks_untrusted_tool_response() -> None:
                 0,
             ),
             stream_mode="custom",
-        )
-    ]
+        ):
+            events.append(event)
 
     threat = next(event for event in events if event.get("type") == "threat_detection")
     assert threat["location"] == "tool_response:scrape_dynamic_page"
     assert threat["status"] == "blocked"
-    failed = next(
+    assert not [
         event
         for event in events
-        if event.get("type") == "tool_status" and event.get("status") == "failed"
-    )
-    assert "ATR blocked" in failed["error"]
+        if event.get("type") == "tool_status" and event.get("status") == "completed"
+    ]
 
 
 class CalibrationRedis:

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
+
+import regex as regex_module
 
 from app.core.threat_detection import SEVERITY_RANK, ThreatDetector
 
@@ -12,6 +15,8 @@ def rule_bundle_manifest(detector: ThreatDetector, source_path: str) -> dict[str
     rules: list[dict[str, Any]] = []
     seen: set[str] = set()
     errors: list[str] = []
+    invalid_conditions: list[dict[str, Any]] = []
+    failed = set(getattr(detector.engine, "_failed_regexes", set()))
     for rule in detector.engine.rules:
         rule_id = str(rule.id)
         if rule_id in seen:
@@ -20,14 +25,39 @@ def rule_bundle_manifest(detector: ThreatDetector, source_path: str) -> dict[str
         severity = str(rule.severity)
         if severity not in SEVERITY_RANK:
             errors.append(f"{rule_id}: invalid severity {severity}")
-        conditions = [
-            {
+        conditions = []
+        for index, condition in enumerate(rule.conditions):
+            condition_record = {
                 "field": str(condition.field),
                 "operator": str(condition.operator),
                 "value": str(condition.value),
             }
-            for condition in rule.conditions
-        ]
+            conditions.append(condition_record)
+            if condition_record["operator"] == "regex":
+                try:
+                    re.compile(condition_record["value"])
+                except re.error:
+                    try:
+                        regex_module.compile(condition_record["value"])
+                    except regex_module.error as exc:
+                        invalid_conditions.append(
+                            {
+                                "rule_id": rule_id,
+                                "condition_index": index,
+                                "error": str(exc),
+                            }
+                        )
+            if (rule_id, index) in failed and not any(
+                item["rule_id"] == rule_id and item["condition_index"] == index
+                for item in invalid_conditions
+            ):
+                invalid_conditions.append(
+                    {
+                        "rule_id": rule_id,
+                        "condition_index": index,
+                        "error": "pyatr could not compile this condition",
+                    }
+                )
         rules.append(
             {
                 "rule_id": rule_id,
@@ -39,6 +69,15 @@ def rule_bundle_manifest(detector: ThreatDetector, source_path: str) -> dict[str
                 "conditions": conditions,
             }
         )
+    invalid_rule_ids = sorted({item["rule_id"] for item in invalid_conditions})
+    if invalid_rule_ids:
+        detector.engine._rules = [
+            rule for rule in detector.engine.rules if str(rule.id) not in invalid_rule_ids
+        ]
+        for rule_id in invalid_rule_ids:
+            detector.engine._compiled.pop(rule_id, None)
+        rules = [rule for rule in rules if rule["rule_id"] not in invalid_rule_ids]
+        detector.rule_count = len(rules)
     rules.sort(key=lambda item: item["rule_id"])
     canonical = json.dumps(rules, sort_keys=True, separators=(",", ":"))
     checksum = hashlib.sha256(canonical.encode()).hexdigest()
@@ -57,6 +96,10 @@ def rule_bundle_manifest(detector: ThreatDetector, source_path: str) -> dict[str
         "validation_report": {
             "valid": not errors and len(rules) > 0,
             "errors": errors,
+            "degraded": bool(invalid_conditions),
+            "invalid_conditions": invalid_conditions,
+            "invalid_rule_ids": invalid_rule_ids,
+            "blocking_eligible": not invalid_conditions,
         },
         "rules": rules,
     }

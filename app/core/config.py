@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     browser_worker_url: str = ""
     browser_worker_token: str = ""
     agent_tool_transport: str = Field(default="local", pattern=r"^(local|mcp)$")
+    atr_lab_mode: bool = False
+    atr_lab_fixture_url: str = "http://fixture-content:8020"
+    atr_lab_deployment_url: str = "http://deployment-simulator:8030"
+    atr_lab_internal_token: str = "development-only-change-me"
+    atr_lab_artifacts_dir: str = "/var/lib/atr-lab/artifacts"
     autonomous_tool_planning: bool = True
     agent_max_tool_rounds: int = Field(default=8, ge=1, le=20)
     agent_default_deadline_seconds: float = Field(default=300.0, ge=1, le=3_600)

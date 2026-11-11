@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.threat_detection import ThreatScan
+from app.core.threat_detection import ATR_BOUNDARIES, ThreatScan
+
+
+def default_boundary_action_map() -> dict[str, dict[str, str]]:
+    base = {
+        "informational": "detect",
+        "low": "detect",
+        "medium": "detect",
+        "high": "block",
+        "critical": "block",
+    }
+    return {boundary: dict(base) for boundary in ATR_BOUNDARIES}
 
 
 def default_atr_policy(settings: Any, tenant_id: str) -> dict[str, Any]:
@@ -20,6 +31,7 @@ def default_atr_policy(settings: Any, tenant_id: str) -> dict[str, Any]:
             "high": "block",
             "critical": "block",
         },
+        "boundary_action_map": default_boundary_action_map(),
         "enabled_rule_ids": list(settings.atr_blocking_rule_ids),
         "excluded_rule_ids": list(settings.atr_blocking_excluded_rule_ids),
         "active": True,
@@ -49,6 +61,8 @@ async def apply_atr_exemptions(runtime: Any, tenant_id: str, scan: ThreatScan) -
                 rule_id=str(finding["rule_id"]),
                 boundary=scan.event_type,
                 content_fingerprint=str(finding.get("content_fingerprint", "")),
+                bundle_checksum=finding.get("bundle_checksum"),
+                policy_version=int(finding.get("policy_version", 0)),
             )
             if exempted:
                 finding.update(
@@ -62,9 +76,7 @@ async def apply_atr_exemptions(runtime: Any, tenant_id: str, scan: ThreatScan) -
         findings.append(finding)
     if not changed:
         return scan
-    blocked = any(
-        finding.get("action") in {"block", "quarantine", "require_approval"} for finding in findings
-    )
+    blocked = any(finding.get("action") == "block" for finding in findings)
     return ThreatScan(
         event_type=scan.event_type,
         location=scan.location,

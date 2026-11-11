@@ -1,4 +1,30 @@
-# AI Operations Gateway
+# AI Operations Gateway — ATR Agent Security Lab
+
+> `atr-governance` 的支援版本是 `v0.2.0-atr-lab`。它以單一 LangGraph Agent、
+> `read_untrusted_page` 與 `deploy_release` 兩個固定工具，驗證 ATR 在輸入、規劃、
+> 工具呼叫、工具回應與模型輸出五個邊界的治理能力；不宣稱可直接合併回完整平台 `main`。
+
+啟動 deterministic Lab：
+
+```bash
+./scripts/atr_lab_up.sh
+```
+
+執行全部 mock 驗收、語料與效能 gate，並在 `artifacts/atr-lab/<run-id>/` 產生
+`manifest.json` 與 `report.zh-TW.md`：
+
+```bash
+./scripts/test_atr_lab.sh
+```
+
+Ollama 是本機 release gate，不在 CI 下載模型：
+
+```bash
+docker compose -f docker-compose.atr-lab.yml --profile ollama up -d --build --wait
+python scripts/verify_atr_lab_ollama.py
+```
+
+完整說明請見 [ATR Lab 操作與驗收](docs/atr-lab.zh-TW.md)。
 
 一個可執行的企業級 AI 運維與資料處理 Gateway 骨架，整合 FastAPI、SSE、
 LangGraph、Playwright、MCP、Redis，以及可互換的 Ollama / vLLM 推理後端。

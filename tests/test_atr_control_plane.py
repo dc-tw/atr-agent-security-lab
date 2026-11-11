@@ -54,12 +54,12 @@ def test_blocking_policy_supports_quarantine_and_privacy_safe_fingerprint() -> N
     detector = ThreatDetector(engine=MatchingEngine(), fingerprint_secret="test-secret")
     scan = detector.scan(
         "hostile payload",
-        event_type="llm_input",
+        event_type="tool_response",
         location="request",
         policy=policy("blocking", "quarantine"),
     )
 
-    assert scan.blocked and scan.quarantined
+    assert not scan.blocked and scan.quarantined
     assert scan.to_event()["status"] == "quarantined"
     assert scan.findings[0]["action"] == "quarantine"
     assert scan.findings[0]["policy_version"] == 7

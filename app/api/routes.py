@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import importlib.metadata
 import json
 import re
 from collections.abc import AsyncIterator
@@ -41,7 +42,7 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
     atr_policy = await active_atr_policy(request.app.state.redis, settings, principal.tenant_id)
     input_threat_scan = await request.app.state.threat_detector.ascan(
         safe_query,
-        event_type="llm_input",
+        event_type="request_input",
         location="agent_request",
         fields={"user_input": safe_query},
         policy=atr_policy,
@@ -660,7 +661,14 @@ async def decide_agent_approval(
         raise HTTPException(status_code=404, detail="Agent run not found")
     if run.get("status") != "waiting_approval":
         raise HTTPException(status_code=409, detail="Run is not waiting for approval")
-    if not payload.approved:
+    pending = run.get("pending_approval")
+    if not isinstance(pending, dict):
+        raise HTTPException(status_code=409, detail="Run has no pending approval record")
+    if payload.approval_id and payload.approval_id != pending.get("approval_id"):
+        raise HTTPException(status_code=409, detail="Approval ID does not match pending decision")
+    if payload.kind and payload.kind != pending.get("kind"):
+        raise HTTPException(status_code=409, detail="Approval kind does not match pending decision")
+    if not payload.is_approved:
         usage = run.get("usage", {})
         if isinstance(usage, dict) and usage.get("provider_reported"):
             await runtime.reconcile_daily_tokens(
@@ -673,6 +681,8 @@ async def decide_agent_approval(
             "type": "approval_rejected",
             "request_id": request_id,
             "reason": payload.reason,
+            "approval_id": pending.get("approval_id"),
+            "kind": pending.get("kind"),
         }
         await runtime.append_event(request_id, event, principal.tenant_id)
         await runtime.save_run_state(request_id, {**run, "status": "rejected"}, principal.tenant_id)
@@ -684,11 +694,47 @@ async def decide_agent_approval(
                 "subject": principal.subject,
                 "request_id": request_id,
                 "reason": payload.reason,
+                "approval_id": pending.get("approval_id"),
+                "kind": pending.get("kind"),
             },
         )
         return {"request_id": request_id, "status": "rejected"}
     if request_id in request.app.state.active_run_ids:
         raise HTTPException(status_code=409, detail="Agent run is already active")
+
+    if pending.get("kind") == "atr":
+        if not hasattr(runtime, "create_enforcement_receipt"):
+            raise HTTPException(
+                status_code=503,
+                detail="ATR approval receipts require PostgreSQL",
+            )
+        current_policy = await runtime.get_active_atr_policy(principal.tenant_id)
+        current_bundle = request.app.state.atr_bundle_manifest.get("checksum")
+        if (
+            current_policy is None
+            or int(current_policy.get("version", 0)) != int(pending.get("policy_version", 0))
+            or current_bundle != pending.get("bundle_checksum")
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="ATR approval is stale; active policy or bundle changed",
+            )
+        for finding_id in pending.get("finding_ids", []):
+            finding = await runtime.get_threat_finding(principal.tenant_id, str(finding_id))
+            if finding is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="ATR approval is stale because its finding is unavailable",
+                )
+            if (
+                int(finding.get("policy_version", 0)) != int(pending.get("policy_version", 0))
+                or finding.get("bundle_checksum") != pending.get("bundle_checksum")
+                or finding.get("content_fingerprint") != pending.get("content_fingerprint")
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="ATR approval is stale; content, policy, or bundle changed",
+                )
 
     model_name = str(run["model"])
     try:
@@ -727,12 +773,22 @@ async def decide_agent_approval(
                 "status": "approved",
                 "subject": principal.subject,
                 "request_id": request_id,
+                "approval_id": pending.get("approval_id"),
+                "kind": pending.get("kind"),
             },
         )
         try:
             async with asyncio.timeout(float(run.get("deadline_seconds", 300))):
                 async for event in graph.astream(
-                    Command(resume={"approved": True, "reason": payload.reason}),
+                    Command(
+                        resume={
+                            "approved": True,
+                            "decision": "approve",
+                            "reason": payload.reason,
+                            "approval_id": pending.get("approval_id"),
+                            "kind": pending.get("kind"),
+                        }
+                    ),
                     config={"configurable": {"thread_id": request_id}},
                     stream_mode="custom",
                 ):
@@ -757,6 +813,23 @@ async def decide_agent_approval(
                                 "event": event,
                             },
                         )
+                    if event.get("type") == "approval_resolved" and event.get("kind") == "atr":
+                        for finding_id in event.get("finding_ids", []):
+                            finding = await runtime.get_threat_finding(
+                                principal.tenant_id, str(finding_id)
+                            )
+                            if finding is not None:
+                                await runtime.create_enforcement_receipt(
+                                    principal.tenant_id,
+                                    finding_id=str(finding_id),
+                                    rule_id=str(finding.get("rule_id", "")),
+                                    bundle_checksum=finding.get("bundle_checksum"),
+                                    policy_version=int(finding.get("policy_version", 0)),
+                                    boundary=str(finding.get("event_type", "tool_call")),
+                                    decision="approved_exception",
+                                    action="require_approval",
+                                    correlation_id=(f"{request_id}:{event.get('approval_id', '')}"),
+                                )
                     if event.get("type") == "model_usage" and isinstance(event.get("usage"), dict):
                         latest_usage = dict(event["usage"])
                         await runtime.save_run_state(
@@ -968,6 +1041,10 @@ async def health(request: Request) -> dict[str, object]:
             "enabled": detector.enabled,
             "blocking": detector.blocking,
             "rules": detector.rule_count,
+            "pyatr_version": importlib.metadata.version("pyatr"),
+            "bundle_version": request.app.state.atr_bundle_manifest.get("version"),
+            "bundle_checksum": request.app.state.atr_bundle_manifest.get("checksum"),
+            "validation_report": request.app.state.atr_bundle_manifest.get("validation_report", {}),
         },
     }
 

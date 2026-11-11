@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
-from app.core.atr_policy import default_atr_policy
+from app.core.atr_policy import default_atr_policy, default_boundary_action_map
 from app.core.atr_rules import load_rule_bundle, rule_bundle_manifest
 from app.core.security import authorize
 from app.core.siem_export import encrypt_sink_secret
-from app.core.threat_detection import SEVERITY_RANK
+from app.core.threat_detection import ALLOWED_BOUNDARY_ACTIONS, ATR_BOUNDARIES, SEVERITY_RANK
 
 router = APIRouter(prefix="/v1/security/atr", tags=["security", "atr"])
 
@@ -31,6 +34,9 @@ class ATRPolicyWrite(BaseModel):
             "critical": "quarantine",
         }
     )
+    boundary_action_map: dict[str, dict[Severity, ATRAction]] = Field(
+        default_factory=default_boundary_action_map
+    )
     enabled_rule_ids: list[str] = Field(default_factory=list, max_length=2_000)
     excluded_rule_ids: list[str] = Field(default_factory=list, max_length=2_000)
 
@@ -50,6 +56,22 @@ class ATRPolicyWrite(BaseModel):
         missing = set(SEVERITY_RANK) - set(value)
         if missing:
             raise ValueError(f"action_map is missing severities: {sorted(missing)}")
+        return value
+
+    @field_validator("boundary_action_map")
+    @classmethod
+    def validate_boundary_action_map(
+        cls, value: dict[str, dict[Severity, ATRAction]]
+    ) -> dict[str, dict[Severity, ATRAction]]:
+        if set(value) != set(ATR_BOUNDARIES):
+            raise ValueError(f"boundary_action_map must contain exactly {list(ATR_BOUNDARIES)}")
+        for boundary, actions in value.items():
+            missing = set(SEVERITY_RANK) - set(actions)
+            if missing:
+                raise ValueError(f"{boundary} is missing severities: {sorted(missing)}")
+            unsupported = set(actions.values()) - ALLOWED_BOUNDARY_ACTIONS[boundary]
+            if unsupported:
+                raise ValueError(f"{boundary} does not support actions: {sorted(unsupported)}")
         return value
 
 
@@ -86,6 +108,33 @@ def _default_policy(request: Request, tenant_id: str) -> dict[str, Any]:
     return default_atr_policy(request.app.state.settings, tenant_id)
 
 
+def _read_lab_evidence(root_value: str) -> list[dict[str, Any]]:
+    root = Path(root_value).resolve()
+    evidence: list[dict[str, Any]] = []
+    if not root.is_dir():
+        return evidence
+    for path in sorted(root.glob("*/manifest.json"), reverse=True)[:100]:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if isinstance(payload, dict):
+            evidence.append(
+                {
+                    "run_id": payload.get("run_id", path.parent.name),
+                    "created_at": payload.get("created_at"),
+                    "git_sha": payload.get("git_sha"),
+                    "model": payload.get("model"),
+                    "bundle_checksum": payload.get("bundle_checksum"),
+                    "policy_version": payload.get("policy_version"),
+                    "passed": payload.get("passed"),
+                    "scenario_count": len(payload.get("scenarios", [])),
+                    "report": f"{path.parent.name}/report.zh-TW.md",
+                }
+            )
+    return evidence
+
+
 @router.get("/policies/active")
 async def get_active_policy(request: Request) -> dict[str, Any]:
     principal = await authorize(request, "viewer")
@@ -107,6 +156,17 @@ async def list_policy_versions(
 async def replace_active_policy(payload: ATRPolicyWrite, request: Request) -> dict[str, Any]:
     principal = await authorize(request, "admin")
     runtime = _runtime(request)
+    manifest = request.app.state.atr_bundle_manifest
+    invalid_rule_ids = set(manifest.get("validation_report", {}).get("invalid_rule_ids", []))
+    if payload.mode == "blocking" and not invalid_rule_ids.issubset(set(payload.excluded_rule_ids)):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "atr_bundle_not_blocking_eligible",
+                "invalid_rule_ids": sorted(invalid_rule_ids),
+                "required_action": "exclude or repair every invalid rule before blocking",
+            },
+        )
     policy = await runtime.create_atr_policy(
         principal.tenant_id,
         payload.model_dump(),
@@ -165,6 +225,29 @@ async def verify_receipts(request: Request) -> dict[str, Any]:
     return await _runtime(request).verify_enforcement_receipts(principal.tenant_id)
 
 
+@router.get("/approvals/pending")
+async def list_pending_approvals(
+    request: Request,
+    limit: Annotated[int, Query(ge=1, le=1_000)] = 100,
+) -> dict[str, Any]:
+    principal = await authorize(request, "operator")
+    approvals = await _runtime(request).list_pending_agent_approvals(
+        principal.tenant_id, limit=limit
+    )
+    return {"approvals": approvals, "count": len(approvals)}
+
+
+@router.get("/lab/evidence")
+async def list_lab_evidence(request: Request) -> dict[str, Any]:
+    await authorize(request, "viewer")
+    if not request.app.state.settings.atr_lab_mode:
+        return {"evidence": [], "count": 0, "lab_enabled": False}
+    evidence = await asyncio.to_thread(
+        _read_lab_evidence, request.app.state.settings.atr_lab_artifacts_dir
+    )
+    return {"evidence": evidence, "count": len(evidence)}
+
+
 @router.post("/findings/{finding_id}/exempt")
 async def create_one_time_exemption(
     finding_id: str, payload: ATRExemptionWrite, request: Request
@@ -208,6 +291,7 @@ async def reload_rules(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     bundle = await runtime.activate_atr_rule_bundle(manifest, activated_by=principal.subject)
     request.app.state.threat_detector = detector
+    request.app.state.atr_bundle_manifest = manifest
     await runtime.append_audit(
         principal.tenant_id,
         {
@@ -274,6 +358,7 @@ async def rollback_rule_bundle(bundle_id: str, request: Request) -> dict[str, An
         )
     activated = await runtime.activate_atr_rule_bundle(manifest, activated_by=principal.subject)
     request.app.state.threat_detector = detector
+    request.app.state.atr_bundle_manifest = manifest
     await runtime.append_audit(
         principal.tenant_id,
         {

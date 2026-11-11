@@ -1,0 +1,206 @@
+name: ai-ops-gateway-atr-lab
+
+x-gateway-environment: &gateway-environment
+  APP_ENV: development
+  API_KEY: ${ATR_LAB_API_KEY:-atr-lab-admin}
+  REDIS_URL: redis://redis:6379/0
+  DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway
+  LLM_BASE_URL: http://mock-model:8080/v1
+  LLM_API_KEY: local-only
+  LLM_MODEL: mock-model
+  LLM_ROUTES_JSON: '{"ollama-lab":{"base_url":"http://ollama:11434/v1","model":"qwen2.5:0.5b-instruct","api_key":"local-only"}}'
+  ATR_LAB_MODE: "true"
+  ATR_LAB_FIXTURE_URL: http://fixture-content:8020
+  ATR_LAB_DEPLOYMENT_URL: http://deployment-simulator:8030
+  ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+  ATR_LAB_ARTIFACTS_DIR: /var/lib/atr-lab/artifacts
+  ATR_ENABLED: "true"
+  ATR_BLOCKING: "false"
+  ATR_JSONL_PATH: /var/log/ai-gateway/atr-siem.jsonl
+
+services:
+  gateway:
+    image: ai-ops-gateway-atr-lab:local
+    build:
+      context: .
+      args: {INSTALL_BROWSER: "false"}
+    environment: *gateway-environment
+    ports: ["8000:8000"]
+    depends_on:
+      redis: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
+      fixture-content: {condition: service_healthy}
+      deployment-simulator: {condition: service_healthy}
+      mock-model: {condition: service_healthy}
+      siem-init: {condition: service_completed_successfully}
+    volumes:
+      - siem-data:/var/log/ai-gateway
+      - ${ATR_LAB_ARTIFACTS_DIR:-./artifacts/atr-lab}:/var/lib/atr-lab/artifacts:ro
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  dashboard:
+    image: ai-ops-gateway-atr-dashboard:local
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    ports: ["3000:8080"]
+    depends_on:
+      gateway: {condition: service_healthy}
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:uid=101,gid=101,mode=0700
+      - /var/run:uid=101,gid=101,mode=0755
+      - /tmp:uid=101,gid=101,mode=0700
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
+    networks: [lab]
+
+  fixture-content:
+    image: ai-ops-gateway-atr-lab:local
+    command:
+      ["uvicorn", "app.lab_services.fixture_content:app", "--host", "0.0.0.0", "--port", "8020"]
+    environment:
+      ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+    expose: ["8020"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  deployment-simulator:
+    image: ai-ops-gateway-atr-lab:local
+    command:
+      ["uvicorn", "app.lab_services.deployment_simulator:app", "--host", "0.0.0.0", "--port", "8030"]
+    environment:
+      ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+      ATR_LAB_DEPLOYMENT_DB: /data/deployments.sqlite3
+    expose: ["8030"]
+    ports: ["127.0.0.1:8030:8030"]
+    depends_on:
+      deployment-init: {condition: service_completed_successfully}
+    volumes: [deployment-data:/data]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8030/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  deployment-init:
+    image: alpine:3.22
+    command: ["sh", "-ec", "chown 10001:10001 /data && chmod 0750 /data"]
+    volumes: [deployment-data:/data]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    read_only: true
+    networks: [lab]
+
+  mock-model:
+    build: {context: tests/docker/mock-llm}
+    expose: ["8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [lab]
+
+  redis:
+    image: redis:8.2-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes: [redis-data:/data]
+    ports: ["127.0.0.1:6389:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [lab]
+
+  postgres:
+    image: postgres:17-alpine
+    environment: {POSTGRES_USER: gateway, POSTGRES_PASSWORD: gateway, POSTGRES_DB: gateway}
+    volumes: [postgres-data:/var/lib/postgresql/data]
+    ports: ["127.0.0.1:55432:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [lab]
+
+  migrate:
+    image: ai-ops-gateway-atr-lab:local
+    build:
+      context: .
+      args: {INSTALL_BROWSER: "false"}
+    command: ["python", "-m", "app.db.migrate"]
+    environment:
+      DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway
+    depends_on:
+      postgres: {condition: service_healthy}
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  siem-init:
+    image: alpine:3.22
+    command: ["sh", "-ec", "chown 10001:10001 /siem && chmod 0750 /siem"]
+    volumes: [siem-data:/siem]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    read_only: true
+    networks: [lab]
+
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:0.12.3
+    volumes: [ollama-data:/root/.ollama]
+    expose: ["11434"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [lab]
+
+  ollama-init:
+    profiles: ["ollama"]
+    image: curlimages/curl:8.16.0
+    depends_on:
+      ollama: {condition: service_healthy}
+    environment: {OLLAMA_MODEL: "qwen2.5:0.5b-instruct"}
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        curl -fsS http://ollama:11434/api/pull
+        -d "{\"name\":\"$${OLLAMA_MODEL}\",\"stream\":false}"
+    networks: [lab]
+
+volumes:
+  deployment-data:
+  ollama-data:
+  postgres-data:
+  redis-data:
+  siem-data:
+
+networks:
+  lab: {driver: bridge}
