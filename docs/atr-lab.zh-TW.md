@@ -2,7 +2,8 @@
 
 ## 版本定位
 
-`atr-governance` 是長期研究分支，版本為 `v0.2.0-atr-lab`。本版只承諾本機 Docker Lab；
+本 repository 由 `dc-tw/ai-ops-gateway` 的 `atr-governance` 長期研究分支獨立建立，
+其 `main` 版本為 `v0.2.0-atr-lab`。本版只承諾本機 Docker Lab；
 Goals、ACP、Skill、forecast、presence、Chief／Worker、多 Agent、Workflow YAML、Kubernetes、
 正式 OIDC、TLS、multi-AZ 與 production SLA 不在驗收範圍。
 
