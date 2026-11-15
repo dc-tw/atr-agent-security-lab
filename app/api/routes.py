@@ -162,6 +162,16 @@ async def stream_agent(payload: AgentRequest, request: Request) -> StreamingResp
         target_urls=[str(url) for url in payload.source_urls],
         max_tool_rounds=payload.max_tool_rounds or settings.agent_max_tool_rounds,
         interactive_approval=request.app.state.checkpointer is not None,
+        lab_identity=(
+            {
+                "subject": principal.subject,
+                "role": principal.role,
+                "device_id": request.headers.get("x-lab-device-id", ""),
+                "session_id": request.headers.get("x-lab-session-id", ""),
+            }
+            if settings.atr_lab_mode
+            else None
+        ),
     )
     queue: asyncio.Queue[tuple[str | None, dict[str, Any]] | object] = asyncio.Queue(maxsize=128)
     consumer_attached = asyncio.Event()

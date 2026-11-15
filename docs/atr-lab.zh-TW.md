@@ -3,7 +3,7 @@
 ## 版本定位
 
 本 repository 由 `dc-tw/ai-ops-gateway` 的 `atr-governance` 長期研究分支獨立建立，
-其 `main` 版本為 `v0.2.0-atr-lab`。本版只承諾本機 Docker Lab；
+其 `main` 版本為 `v0.3.0-compound-lab`。本版只承諾本機 Docker Lab；
 Goals、ACP、Skill、forecast、presence、Chief／Worker、多 Agent、Workflow YAML、Kubernetes、
 正式 OIDC、TLS、multi-AZ 與 production SLA 不在驗收範圍。
 
@@ -23,6 +23,37 @@ Goals、ACP、Skill、forecast、presence、Chief／Worker、多 Agent、Workflo
 ```bash
 docker compose -f docker-compose.atr-lab.yml down
 ```
+
+## Compound Agent Attack Chain
+
+Compose 另啟動 Identity/Credential Broker、Artifact Registry、Deployment Admission Simulator、
+Signing Simulator 與持久化 Scenario Runner。Runner 只接受 `protected`、`baseline` 與預先定義的
+逐層 bypass profile；任意關閉控制會被拒絕，非 Lab mode 的 API 一律回傳 404。
+
+Agent 工具固定為：
+
+- `read_untrusted_page(fixture_id)`
+- `inspect_software_artifact(artifact_id)`
+- `deploy_release(environment, artifact_id, image_digest, change)`
+- `request_high_value_signature(...)`
+
+模型不能提供 endpoint、credential、device、approver 或 idempotency key。Production 部署需要
+Security Reviewer 與 Operations Reviewer 兩個不同帳號；簽署另需 Wallet Approver，申請者不能
+自核。所有 approval 綁定內容 fingerprint 與 policy version，變更後舊核准回傳 409。
+
+Lab API：
+
+```text
+POST /v1/security/atr/lab/compound-runs
+GET  /v1/security/atr/lab/compound-runs
+GET  /v1/security/atr/lab/compound-runs/{run_id}
+GET  /v1/security/atr/lab/compound-runs/{run_id}/events
+POST /v1/security/atr/lab/compound-runs/{run_id}/approvals/{approval_id}
+```
+
+`scripts/verify_compound_lab.py` 執行 protected、fault matrix、benign 三方核准、unsafe baseline、
+stale approval 與 non-leakage 檢查。證據事件只保存 reason code、receipt ID 與 fingerprint，並以
+SHA-256 hash chain 串接；不保存 token、prompt、artifact 原文、destination 或完整簽署 payload。
 
 若要清除 PostgreSQL、Redis、Ollama 與 simulator 資料，需由操作者明確執行 `down --volumes`；
 一般驗收不會自動刪除資料。

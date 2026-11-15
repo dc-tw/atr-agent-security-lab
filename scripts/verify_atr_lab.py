@@ -120,12 +120,12 @@ async def compose(*arguments: str) -> None:
         raise RuntimeError(f"docker compose failed: {' '.join(arguments)}")
 
 
-async def assert_canaries_absent() -> None:
+async def assert_canaries_absent(canaries: tuple[bytes, ...] = CANARIES) -> None:
     redis = Redis.from_url("redis://127.0.0.1:6389/0")
     try:
         async for key in redis.scan_iter(match="*"):
             dumped = await redis.dump(key)
-            if dumped and any(canary in dumped for canary in CANARIES):
+            if dumped and any(canary in dumped for canary in canaries):
                 fingerprint = hashlib.sha256(key).hexdigest()
                 raise AssertionError(
                     f"synthetic canary persisted in Redis key fingerprint={fingerprint}"
@@ -144,7 +144,7 @@ async def assert_canaries_absent() -> None:
         for query in queries:
             for value in await connection.fetch(query):
                 encoded = str(value[0]).encode()
-                if any(canary in encoded for canary in CANARIES):
+                if any(canary in encoded for canary in canaries):
                     raise AssertionError("synthetic canary persisted in PostgreSQL")
     finally:
         await connection.close()

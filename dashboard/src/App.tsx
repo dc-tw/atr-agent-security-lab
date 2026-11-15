@@ -1,14 +1,14 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import { api, Auth, Finding, Policy } from "./api";
 
-type Tab = "overview" | "findings" | "policy" | "approvals" | "evidence" | "rules" | "receipts" | "exports";
+type Tab = "overview" | "findings" | "policy" | "approvals" | "evidence" | "compound-lab" | "rules" | "receipts" | "exports";
 type Row = Record<string, unknown>;
 type RuleStat = Row & {
   rule_id: string; severity: string; detections: number; blocked: number;
   false_positive_rate: number | null; recommended_for_blocking: boolean;
 };
 
-const tabs: Tab[] = ["overview", "findings", "policy", "approvals", "evidence", "rules", "receipts", "exports"];
+const tabs: Tab[] = ["overview", "findings", "policy", "approvals", "evidence", "compound-lab", "rules", "receipts", "exports"];
 const severities = ["informational", "low", "medium", "high", "critical"];
 const boundaryActions: Record<string, string[]> = {
   request_input: ["detect", "block"], planner_output: ["detect", "block"],
@@ -36,6 +36,8 @@ export default function App() {
   const [sinks, setSinks] = useState<Row[]>([]);
   const [approvals, setApprovals] = useState<Row[]>([]);
   const [evidence, setEvidence] = useState<Row[]>([]);
+  const [compoundRuns, setCompoundRuns] = useState<Row[]>([]);
+  const [compoundEvents, setCompoundEvents] = useState<Row[]>([]);
   const [sinkType, setSinkType] = useState<"jsonl" | "webhook">("jsonl");
   const [sinkUrl, setSinkUrl] = useState("");
   const [sinkSecret, setSinkSecret] = useState("");
@@ -56,11 +58,13 @@ export default function App() {
         api<{sinks: Row[]}>("/v1/security/atr/exports/sinks", auth),
         api<{approvals: Row[]}>("/v1/security/atr/approvals/pending", auth),
         api<{evidence: Row[]}>("/v1/security/atr/lab/evidence", auth),
+        api<{runs: Row[]}>("/v1/security/atr/lab/compound-runs", auth),
       ]);
       setFindings(data[0].findings); setPolicy(data[1]); setPolicies(data[2].policies);
       setStats(data[3].rules); setRules(data[4].rules); setBundles(data[5].bundles);
       setReceipts(data[6].receipts); setVerification(data[7]); setSinks(data[8].sinks);
       setApprovals(data[9].approvals); setEvidence(data[10].evidence);
+      setCompoundRuns(data[11].runs);
       setConnected(true);
     } catch (value) { setConnected(false); setError(String(value)); }
   }, [auth]);
@@ -71,6 +75,12 @@ export default function App() {
     try {
       await api(path, auth, { method, body: body === undefined ? undefined : JSON.stringify(body) });
       await load();
+    } catch (value) { setError(String(value)); }
+  };
+  const showCompoundEvents = async (runId: unknown) => {
+    try {
+      const result = await api<{events: Row[]}>(`/v1/security/atr/lab/compound-runs/${String(runId)}/events`, auth);
+      setCompoundEvents(result.events);
     } catch (value) { setError(String(value)); }
   };
   const authenticate = (event: FormEvent) => {
@@ -103,6 +113,7 @@ export default function App() {
       {tab === "policy" && policy && <><Panel title={`Active policy v${policy.version}`}><div className="policy-grid"><label>Mode<select value={policy.mode} onChange={e => setPolicy({...policy,mode:e.target.value as Policy["mode"]})}><option value="detection_only">Detection only</option><option value="blocking">Blocking</option></select></label></div><div className="table-wrap"><table><thead><tr><th>Boundary</th>{severities.map(severity => <th key={severity}>{severity}</th>)}</tr></thead><tbody>{Object.entries(boundaryActions).map(([boundary, actions]) => <tr key={boundary}><td>{boundary}</td>{severities.map(severity => <td key={severity}><select value={policy.boundary_action_map[boundary]?.[severity] ?? "detect"} onChange={e => setPolicy({...policy,boundary_action_map:{...policy.boundary_action_map,[boundary]:{...policy.boundary_action_map[boundary],[severity]:e.target.value}}})}>{actions.map(action => <option key={action}>{action}</option>)}</select></td>)}</tr>)}</tbody></table></div><button onClick={() => void mutate("/v1/security/atr/policies/active","PUT",policy)}>Publish new version</button></Panel><Panel title="Immutable policy history"><Table rows={policies} columns={["version","mode","created_by","created_at"]} actions={row => <button className="secondary" onClick={() => void mutate(`/v1/security/atr/policies/${row.version}/rollback`,"POST")}>Rollback as new version</button>}/></Panel></>}
       {tab === "approvals" && <Panel title="Pending ATR & tool approvals"><Table rows={approvals} columns={["updated_at","request_id","kind","tool","approval_id","policy_version"]}/></Panel>}
       {tab === "evidence" && <Panel title="ATR Lab run evidence"><Table rows={evidence} columns={["created_at","run_id","model","passed","scenario_count","bundle_checksum"]}/></Panel>}
+      {tab === "compound-lab" && <><Panel title="Compound attack defense matrix"><div className="actions"><button onClick={() => void mutate("/v1/security/atr/lab/compound-runs","POST",{scenario_id:"benign",control_profile:"protected",model:"deterministic-mock"})}>Run protected benign</button><button className="secondary" onClick={() => void mutate("/v1/security/atr/lab/compound-runs","POST",{scenario_id:"baseline_theft",control_profile:"baseline",model:"deterministic-mock"})}>Run controlled baseline</button></div><Table rows={compoundRuns} columns={["created_at","scenario_id","control_profile","status","current_stage","stopped_layer","deployment_count","signing_count","policy_version"]} actions={row => <button className="secondary" onClick={() => void showCompoundEvents(row.run_id)}>Timeline</button>}/></Panel><Panel title="Hash-chained layer decisions"><Table rows={compoundEvents} columns={["sequence","stage","layer","decision","reason_code","receipt_id","event_hash"]}/></Panel></>}
       {tab === "rules" && <><Panel title="Active rule registry"><button onClick={() => void mutate("/v1/security/atr/rules/reload","POST")}>Atomic reload mounted bundle</button><Table rows={rules} columns={["rule_id","title","severity","status","condition_count"]}/></Panel><Panel title="Bundle history"><Table rows={bundles} columns={["version","checksum","rule_count","active","activated_at"]} actions={row => <button className="secondary" onClick={() => void mutate(`/v1/security/atr/rules/bundles/${row.bundle_id}/rollback`,"POST")}>Rollback</button>}/></Panel></>}
       {tab === "receipts" && <><Panel title="Chain verification"><p className={verification?.valid ? "good" : "error"}>{verification?.valid ? `Verified ${verification.count} chained receipts` : "Receipt chain failed verification"}</p></Panel><Panel title="Enforcement receipts"><Table rows={receipts} columns={["sequence","rule_id","decision","action","policy_version","created_at"]}/></Panel></>}
       {tab === "exports" && <Panel title="SIEM export sinks"><div className="sink-form"><label>Type<select value={sinkType} onChange={e => setSinkType(e.target.value as "jsonl"|"webhook")}><option value="jsonl">JSONL</option><option value="webhook">Signed webhook</option></select></label>{sinkType === "webhook" && <><label>HTTPS URL<input value={sinkUrl} onChange={e => setSinkUrl(e.target.value)} placeholder="https://siem.example/atr"/></label><label>Signing secret<input type="password" value={sinkSecret} onChange={e => setSinkSecret(e.target.value)}/></label></>}<button onClick={() => void mutate("/v1/security/atr/exports/sinks","POST",{sink_type:sinkType,url:sinkType === "webhook" ? sinkUrl : null,secret:sinkType === "webhook" ? sinkSecret : ""})}>Create sink</button></div><Table rows={sinks} columns={["sink_type","url","enabled","created_at"]} actions={row => <button className="secondary" onClick={() => void mutate(`/v1/security/atr/exports/sinks/${row.sink_id}`,"DELETE")}>Delete</button>}/></Panel>}

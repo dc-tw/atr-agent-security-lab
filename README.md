@@ -1,9 +1,9 @@
 # ATR Agent Security Lab
 
 > 本 repository 是從 `dc-tw/ai-ops-gateway` 的 `atr-governance` 研究分支獨立出的
-> ATR-focused Lab，支援版本是 `v0.2.0-atr-lab`。它以單一 LangGraph Agent、
-> `read_untrusted_page` 與 `deploy_release` 兩個固定工具，驗證 ATR 在輸入、規劃、
-> 工具呼叫、工具回應與模型輸出五個邊界的治理能力。完整 Gateway 平台的 Skills、
+> ATR-focused Lab，支援版本是 `v0.3.0-compound-lab`。它以單一 LangGraph Agent、
+> 四個 server-routed 固定工具，驗證 ATR 在五個內容邊界的治理能力，並以確定性
+> Scenario Runner 驗證 IAM、供應鏈、部署准入與高價值簽署的縱深防禦。完整 Gateway 平台的 Skills、
 > Workflow YAML、ACP、Chief／多 Agent、presence 與 plan-forecast 不屬於本 Lab 的支援範圍。
 
 啟動 deterministic Lab：
@@ -27,6 +27,11 @@ python scripts/verify_atr_lab_ollama.py
 ```
 
 完整說明請見 [ATR Lab 操作與驗收](docs/atr-lab.zh-TW.md)。
+
+Compound Lab 的核心驗收是 `protected`、受控逐層 bypass 與 `baseline` 三組結果：受保護
+路徑必須在合適的安全層停止且零副作用；逐層 bypass 必須證明下一層能獨立阻擋；只有
+Lab admin 可啟動的 baseline 才會產生一次虛擬部署與簽署。這些都是合成資料，不包含真實
+credential、私鑰、資產、惡意程式或外部系統寫入。
 
 這是一套用來產生可重現 ATR 治理證據的本機 Docker Lab，整合 FastAPI、SSE、
 LangGraph、Redis、PostgreSQL、deterministic mock model 與 Ollama。它具備企業控制面概念，

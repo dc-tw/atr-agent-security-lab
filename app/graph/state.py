@@ -26,4 +26,5 @@ class AgentState(TypedDict):
     evidence_report: dict[str, object]
     usage: dict[str, float | int]
     answer: str
+    lab_identity: NotRequired[dict[str, str]]
     last_error: NotRequired[str]

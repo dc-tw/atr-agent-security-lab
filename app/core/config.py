@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     atr_lab_mode: bool = False
     atr_lab_fixture_url: str = "http://fixture-content:8020"
     atr_lab_deployment_url: str = "http://deployment-simulator:8030"
+    atr_lab_artifact_url: str = "http://artifact-registry:8040"
+    atr_lab_signing_url: str = "http://signing-simulator:8050"
+    atr_lab_compound_url: str = "http://compound-runner:8060"
     atr_lab_internal_token: str = "development-only-change-me"
     atr_lab_artifacts_dir: str = "/var/lib/atr-lab/artifacts"
     autonomous_tool_planning: bool = True

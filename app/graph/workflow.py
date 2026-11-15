@@ -608,7 +608,16 @@ def build_agent_graph(
                         )
                     if tool_executor:
                         invoke_arguments = dict(arguments)
-                        if name == "deploy_release":
+                        if state.get("lab_identity"):
+                            invoke_arguments.update(
+                                {
+                                    "_lab_subject": state["lab_identity"].get("subject", ""),
+                                    "_lab_role": state["lab_identity"].get("role", ""),
+                                    "_lab_device_id": state["lab_identity"].get("device_id", ""),
+                                    "_lab_session_id": state["lab_identity"].get("session_id", ""),
+                                }
+                            )
+                        if name in {"deploy_release", "request_high_value_signature"}:
                             invoke_arguments["_idempotency_key"] = hashlib.sha256(
                                 f"{state['request_id']}|{state['tool_round'] + 1}|{name}".encode()
                             ).hexdigest()
@@ -994,6 +1003,7 @@ def initial_state(
     target_urls: list[str] | None = None,
     max_tool_rounds: int = 8,
     interactive_approval: bool = False,
+    lab_identity: dict[str, str] | None = None,
 ) -> AgentState:
     return AgentState(
         request_id=request_id,
@@ -1026,4 +1036,5 @@ def initial_state(
             "provider_reported": False,
         },
         answer="",
+        lab_identity=lab_identity or {},
     )

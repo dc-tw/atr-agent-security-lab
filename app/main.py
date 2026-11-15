@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.atr_routes import router as atr_router
+from app.api.compound_routes import router as compound_router
 from app.api.routes import router
 from app.api.security_routes import router as security_router
 from app.core.atr_rules import rule_bundle_manifest
@@ -45,6 +46,9 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
                 app_settings.atr_lab_fixture_url,
                 app_settings.atr_lab_deployment_url,
                 app_settings.atr_lab_internal_token,
+                artifact_url=app_settings.atr_lab_artifact_url,
+                signing_url=app_settings.atr_lab_signing_url,
+                compound_url=app_settings.atr_lab_compound_url,
             )
         elif app_settings.browser_worker_url:
             remote = RemoteBrowserToolExecutor(
@@ -142,11 +146,12 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
 
     app = FastAPI(
         title="AI Operations Gateway",
-        version="0.2.0-atr-lab" if app_settings.atr_lab_mode else "0.2.0",
+        version="0.3.0-compound-lab" if app_settings.atr_lab_mode else "0.3.0",
         lifespan=lifespan,
     )
     app.include_router(router)
     app.include_router(atr_router)
+    app.include_router(compound_router)
     app.include_router(security_router)
     app.include_router(goals_router)
     install_observability(app, app_settings)

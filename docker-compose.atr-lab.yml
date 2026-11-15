@@ -3,6 +3,7 @@ name: ai-ops-gateway-atr-lab
 x-gateway-environment: &gateway-environment
   APP_ENV: development
   API_KEY: ${ATR_LAB_API_KEY:-atr-lab-admin}
+  API_KEYS_JSON: '{"atr-lab-admin":{"subject":"lab-admin","tenant_id":"atr-lab","role":"admin"},"engineer-a-key":{"subject":"engineer-a","tenant_id":"atr-lab","role":"operator"},"security-reviewer-key":{"subject":"security-reviewer","tenant_id":"atr-lab","role":"operator"},"operations-reviewer-key":{"subject":"operations-reviewer","tenant_id":"atr-lab","role":"operator"},"wallet-approver-key":{"subject":"wallet-approver","tenant_id":"atr-lab","role":"operator"}}'
   REDIS_URL: redis://redis:6379/0
   DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway
   LLM_BASE_URL: http://mock-model:8080/v1
@@ -12,6 +13,9 @@ x-gateway-environment: &gateway-environment
   ATR_LAB_MODE: "true"
   ATR_LAB_FIXTURE_URL: http://fixture-content:8020
   ATR_LAB_DEPLOYMENT_URL: http://deployment-simulator:8030
+  ATR_LAB_ARTIFACT_URL: http://artifact-registry:8040
+  ATR_LAB_SIGNING_URL: http://signing-simulator:8050
+  ATR_LAB_COMPOUND_URL: http://compound-runner:8060
   ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
   ATR_LAB_ARTIFACTS_DIR: /var/lib/atr-lab/artifacts
   ATR_ENABLED: "true"
@@ -31,6 +35,9 @@ services:
       migrate: {condition: service_completed_successfully}
       fixture-content: {condition: service_healthy}
       deployment-simulator: {condition: service_healthy}
+      artifact-registry: {condition: service_healthy}
+      signing-simulator: {condition: service_healthy}
+      compound-runner: {condition: service_healthy}
       mock-model: {condition: service_healthy}
       siem-init: {condition: service_completed_successfully}
     volumes:
@@ -105,6 +112,103 @@ services:
     image: alpine:3.22
     command: ["sh", "-ec", "chown 10001:10001 /data && chmod 0750 /data"]
     volumes: [deployment-data:/data]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    read_only: true
+    networks: [lab]
+
+  identity-broker:
+    image: ai-ops-gateway-atr-lab:local
+    command: ["uvicorn", "app.lab_services.identity_broker:app", "--host", "0.0.0.0", "--port", "8010"]
+    environment:
+      ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+      ATR_LAB_IDENTITY_DB: /data/identity.sqlite3
+    expose: ["8010"]
+    depends_on: {compound-data-init: {condition: service_completed_successfully}}
+    volumes: [identity-data:/data]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  artifact-registry:
+    image: ai-ops-gateway-atr-lab:local
+    command: ["uvicorn", "app.lab_services.artifact_registry:app", "--host", "0.0.0.0", "--port", "8040"]
+    environment:
+      ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+    expose: ["8040"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8040/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  signing-simulator:
+    image: ai-ops-gateway-atr-lab:local
+    command: ["uvicorn", "app.lab_services.signing_simulator:app", "--host", "0.0.0.0", "--port", "8050"]
+    environment:
+      ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+      ATR_LAB_SIGNING_DB: /data/signing.sqlite3
+    expose: ["8050"]
+    ports: ["127.0.0.1:8050:8050"]
+    depends_on: {compound-data-init: {condition: service_completed_successfully}}
+    volumes: [signing-data:/data]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8050/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  compound-runner:
+    image: ai-ops-gateway-atr-lab:local
+    command: ["uvicorn", "app.lab_services.compound_runner:app", "--host", "0.0.0.0", "--port", "8060"]
+    environment:
+      ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+      ATR_LAB_COMPOUND_DB: /data/compound.sqlite3
+      ATR_LAB_DEPLOYMENT_URL: http://deployment-simulator:8030
+      ATR_LAB_SIGNING_URL: http://signing-simulator:8050
+    expose: ["8060"]
+    depends_on:
+      compound-data-init: {condition: service_completed_successfully}
+      identity-broker: {condition: service_healthy}
+      artifact-registry: {condition: service_healthy}
+      deployment-simulator: {condition: service_healthy}
+      signing-simulator: {condition: service_healthy}
+    volumes: [compound-data:/data]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  compound-data-init:
+    image: alpine:3.22
+    command: ["sh", "-ec", "chown 10001:10001 /compound /identity /signing && chmod 0750 /compound /identity /signing"]
+    volumes:
+      - compound-data:/compound
+      - identity-data:/identity
+      - signing-data:/signing
     cap_drop: [ALL]
     cap_add: [CHOWN, FOWNER]
     read_only: true
@@ -196,10 +300,13 @@ services:
     networks: [lab]
 
 volumes:
+  compound-data:
   deployment-data:
+  identity-data:
   ollama-data:
   postgres-data:
   redis-data:
+  signing-data:
   siem-data:
 
 networks:
