@@ -66,7 +66,7 @@ def create_evidence_bundle(
         "predicateType": "https://slsa.dev/provenance/v1",
         "predicate": {
             "buildDefinition": {
-                "buildType": "https://github.com/dc-tw/atr-agent-security-lab/compound-lab/v0.5",
+                "buildType": "https://github.com/dc-tw/atr-agent-security-lab/compound-lab/v0.6",
                 "externalParameters": {
                     "model": manifest.get("model"),
                     "policyVersion": manifest.get("policy_version"),

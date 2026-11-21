@@ -475,7 +475,7 @@ def main() -> int:
     ).stdout.strip()
     passed = all(item["passed"] for item in scenarios) and non_leakage and chain_valid
     manifest = {
-        "schema_version": "v0.5.0-atr-rule-hardening",
+        "schema_version": "v0.6.0-adversarial-validation",
         "run_id": run_id,
         "created_at": datetime.now(UTC).isoformat(),
         "git_sha": git_sha,

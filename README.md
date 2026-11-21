@@ -1,7 +1,7 @@
 # ATR Agent Security Lab
 
 > 本 repository 是從 `dc-tw/ai-ops-gateway` 的 `atr-governance` 研究分支獨立出的
-> ATR-focused Lab，支援版本是 `v0.5.0-atr-rule-hardening`。它以單一 LangGraph Agent、
+> ATR-focused Lab，支援版本是 `v0.6.0-adversarial-validation`。它以單一 LangGraph Agent、
 > 四個 server-routed 固定工具，驗證 ATR 在五個內容邊界的治理能力，並以確定性
 > Scenario Runner 驗證 IAM、供應鏈、部署准入與高價值簽署的縱深防禦。完整 Gateway 平台的 Skills、
 > Workflow YAML、ACP、Chief／多 Agent、presence 與 plan-forecast 不屬於本 Lab 的支援範圍。
@@ -42,6 +42,11 @@ v0.5 深化 ATR 規則治理：修復 `ATR-2026-00290` 的已知無效 condition
 tool action 五條 Gateway hardening rules；每條候選規則以獨立正反語料計算 FP/FN。Policy 可依
 `detection_only → shadow → blocking` 晉級，晉級時驗證雙人覆核、Cohen's kappa、bundle checksum
 及逐規則門檻。Rule bundle 另支援 Ed25519 簽章、外部信任根、撤銷 fingerprint 與來源 provenance。
+
+v0.6 加入有界的 ATR 正規化視圖與 adversarial mutation gate，涵蓋 Unicode NFKC、零寬字元、
+同形字、HTML entity、URL encoding、Unicode escape、Base64、分隔字母與跨行片段。原始內容不會因正規化
+被寫入 finding；finding 仍只保存原始內容的 HMAC fingerprint。正式 release readiness 另要求外部
+Ed25519 trust anchor、out-of-band fingerprint，以及兩位真人使用不同 Ed25519 key 簽署完整語料 verdict digest。
 
 這是一套用來產生可重現 ATR 治理證據的本機 Docker Lab，整合 FastAPI、SSE、
 LangGraph、Redis、PostgreSQL、deterministic mock model 與 Ollama。它具備企業控制面概念，

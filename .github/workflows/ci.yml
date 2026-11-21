@@ -22,6 +22,7 @@ jobs:
       - run: docker compose config --quiet
       - run: docker compose -f docker-compose.atr-lab.yml config --quiet
       - run: python scripts/evaluate_atr_corpus.py
+      - run: python scripts/evaluate_atr_mutations.py
       - run: python scripts/benchmark_atr.py --iterations 200 --max-p95-ms 50
       - run: python scripts/benchmark_compound_policy.py --iterations 200 --max-p95-ms 100
       - name: Validate Kubernetes YAML

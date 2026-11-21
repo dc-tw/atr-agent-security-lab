@@ -9,7 +9,7 @@ from scripts.evidence_bundle import create_evidence_bundle, verify_evidence_bund
 
 def _manifest() -> dict[str, object]:
     return {
-        "schema_version": "v0.5.0-atr-rule-hardening",
+        "schema_version": "v0.6.0-adversarial-validation",
         "run_id": "evidence-test",
         "git_sha": "a" * 40,
         "model": "mock",

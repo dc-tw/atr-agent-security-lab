@@ -10,6 +10,8 @@ from uuid import uuid4
 
 from pyatr import AgentEvent, ATREngine
 
+from app.core.atr_normalization import normalize_for_atr
+
 SEVERITY_RANK = {"informational": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 ATR_BOUNDARIES = (
     "request_input",
@@ -185,14 +187,20 @@ class ThreatDetector:
         if not self.enabled:
             return ThreatScan(event_type, location, (), False)
         bounded_content, truncated = self._bounded(str(content))
+        scan_content, normalized_truncated = self._bounded(normalize_for_atr(bounded_content))
+        truncated = truncated or normalized_truncated
         bounded_fields: dict[str, str] = {}
         for key, value in (fields or {}).items():
             bounded_value, was_truncated = self._bounded(str(value))
-            bounded_fields[str(key)] = bounded_value
+            normalized_value, normalized_was_truncated = self._bounded(
+                normalize_for_atr(bounded_value)
+            )
+            bounded_fields[str(key)] = normalized_value
             truncated = truncated or was_truncated
+            truncated = truncated or normalized_was_truncated
         matches = self.engine.evaluate(
             AgentEvent(
-                content=bounded_content,
+                content=scan_content,
                 event_type=event_type,
                 fields=bounded_fields,
                 metadata={str(key): str(value) for key, value in (metadata or {}).items()},

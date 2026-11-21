@@ -8,7 +8,7 @@ from evidence_bundle import verify_evidence_bundle
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify a v0.5 ATR Lab evidence bundle offline")
+    parser = argparse.ArgumentParser(description="Verify a v0.6 ATR Lab evidence bundle offline")
     parser.add_argument("artifact_dir", type=Path)
     parser.add_argument("--trusted-public-key", type=Path)
     parser.add_argument("--expected-key-sha256")

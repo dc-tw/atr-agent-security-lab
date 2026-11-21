@@ -3,7 +3,7 @@
 ## 版本定位
 
 本 repository 由 `dc-tw/ai-ops-gateway` 的 `atr-governance` 長期研究分支獨立建立，
-其 `main` 版本為 `v0.5.0-atr-rule-hardening`。本版只承諾本機 Docker Lab；
+其 `main` 版本為 `v0.6.0-adversarial-validation`。本版只承諾本機 Docker Lab；
 Goals、ACP、Skill、forecast、presence、Chief／Worker、多 Agent、Workflow YAML、Kubernetes、
 正式 OIDC、TLS、multi-AZ 與 production SLA 不在驗收範圍。
 
@@ -141,6 +141,25 @@ Bundle manifest 保存 pyatr 版本、來源、hardening 版本、規則 checksu
 - `ATR_BUNDLE_REVOKED_KEY_SHA256`：逗號分隔的撤銷公鑰 fingerprints。
 
 reload 與 rollback 都重新驗證 checksum、簽章與撤銷狀態；舊 bundle 即使曾成功啟用，簽署金鑰遭撤銷後也不能再次 rollback 啟用。
+
+## Adversarial mutation 與正式 release gate
+
+`python scripts/evaluate_atr_mutations.py` 驗證 Unicode NFKC、零寬字元、同形字、HTML／URL encoding、
+Unicode escape、Base64、分隔字母與跨行片段。正規化與解碼有大小及 token 數上限，且只建立掃描視圖；
+finding、audit 與 evidence 不保存還原後內容。
+
+正式 release gate 不接受 synthetic Lab reviewer，也不接受只信任 evidence bundle 內附公鑰：
+
+```bash
+python scripts/verify_release_readiness.py artifacts/atr-lab/<run-id> \
+  --trusted-public-key /secure/org-atr-evidence-public.pem \
+  --expected-key-sha256 <out-of-band-fingerprint> \
+  --human-review-attestation /secure/human-review-attestation.json
+```
+
+真人覆核 attestation 必須覆蓋 canonical corpus 與 mutation corpus 的全部案例，兩位 reviewer 使用不同
+Ed25519 key 簽署各自 verdict digest，Cohen's kappa 至少 0.8，且所有 disagreement 已處理。公鑰與真人
+身分的對應仍須由組織透過獨立管道確認；Lab 不會自行宣稱 synthetic identity 是真人。
 
 ## 證據與隱私
 
