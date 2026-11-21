@@ -1,7 +1,7 @@
 # ATR Agent Security Lab
 
 > 本 repository 是從 `dc-tw/ai-ops-gateway` 的 `atr-governance` 研究分支獨立出的
-> ATR-focused Lab，支援版本是 `v0.3.0-compound-lab`。它以單一 LangGraph Agent、
+> ATR-focused Lab，支援版本是 `v0.5.0-atr-rule-hardening`。它以單一 LangGraph Agent、
 > 四個 server-routed 固定工具，驗證 ATR 在五個內容邊界的治理能力，並以確定性
 > Scenario Runner 驗證 IAM、供應鏈、部署准入與高價值簽署的縱深防禦。完整 Gateway 平台的 Skills、
 > Workflow YAML、ACP、Chief／多 Agent、presence 與 plan-forecast 不屬於本 Lab 的支援範圍。
@@ -13,7 +13,7 @@
 ```
 
 執行全部 mock 驗收、語料與效能 gate，並在 `artifacts/atr-lab/<run-id>/` 產生
-`manifest.json` 與 `report.zh-TW.md`：
+可離線驗證的 Ed25519 簽章證據包（manifest、繁中報告、SBOM 與 provenance）：
 
 ```bash
 ./scripts/test_atr_lab.sh
@@ -32,6 +32,16 @@ Compound Lab 的核心驗收是 `protected`、受控逐層 bypass 與 `baseline`
 路徑必須在合適的安全層停止且零副作用；逐層 bypass 必須證明下一層能獨立阻擋；只有
 Lab admin 可啟動的 baseline 才會產生一次虛擬部署與簽署。這些都是合成資料，不包含真實
 credential、私鑰、資產、惡意程式或外部系統寫入。
+
+v0.4 另加入可控的 timeout／503／截斷回應故障代理、Runner 三個精確 crash boundary、
+policy／bundle／artifact／credential／payload 五類核准失效，以及兩位獨立 reviewer 的盲標與
+Cohen's kappa 統計。這些能力的目的是強化「證據可重現與可驗證」，不把本機 Lab 宣稱為 production 系統。
+
+v0.5 深化 ATR 規則治理：修復 `ATR-2026-00290` 的已知無效 condition 並留下 checksum receipt，
+加入 credential exfiltration、remote control、policy bypass、malicious deployment 與 indirect
+tool action 五條 Gateway hardening rules；每條候選規則以獨立正反語料計算 FP/FN。Policy 可依
+`detection_only → shadow → blocking` 晉級，晉級時驗證雙人覆核、Cohen's kappa、bundle checksum
+及逐規則門檻。Rule bundle 另支援 Ed25519 簽章、外部信任根、撤銷 fingerprint 與來源 provenance。
 
 這是一套用來產生可重現 ATR 治理證據的本機 Docker Lab，整合 FastAPI、SSE、
 LangGraph、Redis、PostgreSQL、deterministic mock model 與 Ollama。它具備企業控制面概念，

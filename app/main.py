@@ -146,7 +146,7 @@ def create_app(*, graph=None, settings: Settings | None = None, redis_runtime=No
 
     app = FastAPI(
         title="AI Operations Gateway",
-        version="0.3.0-compound-lab" if app_settings.atr_lab_mode else "0.3.0",
+        version="0.5.0-atr-rule-hardening" if app_settings.atr_lab_mode else "0.5.0",
         lifespan=lifespan,
     )
     app.include_router(router)

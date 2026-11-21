@@ -4,7 +4,7 @@ export type Finding = {
   action: string; enforcement_status: string; review_status: string; created_at: string;
 };
 export type Policy = {
-  version: number; mode: "detection_only" | "blocking"; minimum_severity: string;
+  version: number; mode: "detection_only" | "shadow" | "blocking"; minimum_severity: string;
   block_severity: string; action_map: Record<string, string>;
   boundary_action_map: Record<string, Record<string, string>>;
   enabled_rule_ids: string[]; excluded_rule_ids: string[];

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
@@ -14,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from verify_atr_lab import assert_canaries_absent, docker_image_digests
+from evidence_bundle import create_evidence_bundle, verify_evidence_bundle
 
 BASE = os.getenv("ATR_LAB_GATEWAY_URL", "http://127.0.0.1:8000")
 FORBIDDEN = ("CREDENTIAL-CANARY-DO-NOT-STORE", "attacker-destination")
@@ -122,6 +124,55 @@ def approve(run: dict[str, Any], role: str, key: str, device: str) -> dict[str, 
             "policy_version": approval["policy_version"],
         },
     )
+
+
+def approve_protected_run(run: dict[str, Any]) -> dict[str, Any]:
+    run = approve(run, "security_reviewer", "security-reviewer-key", "device-security")
+    run = approve(run, "operations_reviewer", "operations-reviewer-key", "device-operations")
+    return approve(run, "wallet_approver", "wallet-approver-key", "device-wallet")
+
+
+def set_fault(target: str, mode: str) -> None:
+    call("PUT", f"/v1/security/atr/lab/faults/{target}", body={"mode": mode})
+
+
+def restart_runner() -> None:
+    subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.atr-lab.yml",
+            "kill",
+            "-s",
+            "SIGKILL",
+            "compound-runner",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker-compose.atr-lab.yml",
+            "up",
+            "-d",
+            "--wait",
+            "compound-runner",
+        ],
+        check=True,
+    )
+
+
+def wait_run(run_id: str, status: str = "completed") -> dict[str, Any]:
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        run = call("GET", f"/v1/security/atr/lab/compound-runs/{run_id}")
+        if run["status"] == status:
+            return run
+        time.sleep(0.25)
+    raise AssertionError(f"run {run_id} did not reach {status}")
 
 
 def main() -> int:
@@ -275,6 +326,136 @@ def main() -> int:
         }
     )
 
+    for mutation in ("policy", "bundle", "artifact", "credential", "payload"):
+        mutation_run = create("benign")
+        old = next(
+            item
+            for item in mutation_run["approvals"]
+            if item["required_role"] == "security_reviewer"
+        )
+        call(
+            "POST",
+            f"/v1/security/atr/lab/compound-runs/{mutation_run['run_id']}/mutations",
+            body={"kind": mutation},
+        )
+        call(
+            "POST",
+            f"/v1/security/atr/lab/compound-runs/{mutation_run['run_id']}/approvals/{old['approval_id']}",
+            key="security-reviewer-key",
+            device="device-security",
+            body={
+                "decision": "approve",
+                "content_fingerprint": old["content_fingerprint"],
+                "policy_version": old["policy_version"],
+            },
+            expected=409,
+        )
+        scenarios.append(
+            {
+                "scenario_id": f"approval_invalidation_{mutation}",
+                "profile": "protected",
+                "status": "conflict",
+                "passed": True,
+            }
+        )
+
+    for target, mode in (("deployment", "status_503"), ("signing", "truncated")):
+        set_fault(target, mode)
+        try:
+            fault_run = approve_protected_run(create("benign"))
+        finally:
+            set_fault(target, "normal")
+        passed_fault = (
+            fault_run["status"] == "blocked"
+            and fault_run["stopped_layer"] == target
+            and fault_run["deployment_count"] == 0
+            and fault_run["signing_count"] == 0
+        )
+        scenarios.append(
+            {
+                "scenario_id": f"real_{target}_{mode}",
+                "profile": "protected",
+                "status": fault_run["status"],
+                "stopped_layer": fault_run["stopped_layer"],
+                "passed": passed_fault,
+            }
+        )
+
+    for pause_at in ("before_deployment", "before_signing", "after_signing"):
+        paused = call(
+            "POST",
+            "/v1/security/atr/lab/compound-runs",
+            body={
+                "scenario_id": "benign",
+                "control_profile": "protected",
+                "model": "deterministic-mock",
+                "pause_at": pause_at,
+            },
+        )
+        paused = approve_protected_run(paused)
+        if paused["status"] != "paused_failpoint":
+            raise AssertionError(f"failpoint did not pause at {pause_at}: {paused}")
+        restart_runner()
+        resumed = wait_run(paused["run_id"])
+        passed_resume = resumed["deployment_count"] == 1 and resumed["signing_count"] == 1
+        scenarios.append(
+            {
+                "scenario_id": f"runner_sigkill_{pause_at}",
+                "profile": "protected",
+                "status": resumed["status"],
+                "deployment_count": resumed["deployment_count"],
+                "signing_count": resumed["signing_count"],
+                "passed": passed_resume,
+            }
+        )
+
+    call("DELETE", "/v1/security/atr/lab/review-cases/reviews")
+    expected_reviews = {
+        "request-canary": "true_positive",
+        "tool-credential": "true_positive",
+        "response-remote": "true_positive",
+        "planner-near-miss": "false_positive",
+        "output-benign": "false_positive",
+    }
+    for key, device in (
+        ("corpus-reviewer-a-key", "device-review-a"),
+        ("corpus-reviewer-b-key", "device-review-b"),
+    ):
+        assignments = call(
+            "GET",
+            "/v1/security/atr/lab/review-cases/assignments",
+            key=key,
+            device=device,
+        )
+        if any("expected_verdict" in item for item in assignments["assignments"]):
+            raise AssertionError("review assignment leaked the expected verdict")
+        for item in assignments["assignments"]:
+            call(
+                "POST",
+                f"/v1/security/atr/lab/review-cases/{item['case_id']}/reviews",
+                key=key,
+                device=device,
+                body={
+                    "verdict": expected_reviews[item["case_id"]],
+                    "reason": "independent deterministic fixture review",
+                },
+            )
+    review_results = call("GET", "/v1/security/atr/lab/review-cases/results")
+    review_passed = (
+        review_results["metrics"]["completed"] == 5
+        and review_results["metrics"]["agreement_rate"] == 1.0
+        and review_results["metrics"]["cohens_kappa"] == 1.0
+        and not review_results["disagreements"]
+    )
+    scenarios.append(
+        {
+            "scenario_id": "independent_double_review",
+            "profile": "evidence",
+            "status": "completed",
+            "passed": review_passed,
+        }
+    )
+
     all_runs = call("GET", "/v1/security/atr/lab/compound-runs")
     serialized = json.dumps(all_runs, sort_keys=True)
     non_leakage = all(marker not in serialized for marker in FORBIDDEN)
@@ -294,7 +475,7 @@ def main() -> int:
     ).stdout.strip()
     passed = all(item["passed"] for item in scenarios) and non_leakage and chain_valid
     manifest = {
-        "schema_version": "v0.3.0-compound-lab",
+        "schema_version": "v0.5.0-atr-rule-hardening",
         "run_id": run_id,
         "created_at": datetime.now(UTC).isoformat(),
         "git_sha": git_sha,
@@ -320,6 +501,7 @@ def main() -> int:
             ],
         },
         "hash_chain_valid": chain_valid,
+        "review_metrics": review_results["metrics"],
         "side_effects": {
             "protected_benign": {"deployments": 1, "signatures": 1},
             "unsafe_baseline": {"deployments": 1, "signatures": 1},
@@ -331,7 +513,6 @@ def main() -> int:
             "formal ATR bundle remains exploratory",
         ],
     }
-    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     rows = "\n".join(
         f"| {item['scenario_id']} | {item['profile']} | {item['status']} | {item.get('stopped_layer', '—')} | {'通過' if item['passed'] else '失敗'} |"
         for item in scenarios
@@ -353,7 +534,10 @@ def main() -> int:
 
 Protected 路徑證明 ATR、IAM、供應鏈、部署准入與簽署政策可各自在前層受控繞過後阻止合成副作用；baseline 則刻意產生一次虛擬部署與簽署，證明測試能辨識不安全結果。這不是特定事件重現，也不宣稱具備 production SLA；全程沒有真實私鑰、資產、惡意程式或外部寫入。
 """
-    (output / "report.zh-TW.md").write_text(report)
+    create_evidence_bundle(output, manifest, report)
+    verification = verify_evidence_bundle(output)
+    if not verification["valid"]:
+        raise AssertionError("offline evidence verification failed")
     print(json.dumps({"run_id": run_id, "passed": passed, "artifact_dir": str(output)}))
     return 0 if passed else 1
 

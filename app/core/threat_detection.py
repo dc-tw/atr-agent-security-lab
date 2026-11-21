@@ -143,6 +143,12 @@ class ThreatDetector:
             self.rule_count = self.engine.load_default_rules()
         if self.rule_count == 0:
             raise RuntimeError("ATR is enabled but no threat rules were loaded")
+        self.remediation_receipts: list[dict[str, Any]] = []
+        if isinstance(self.engine, ATREngine):
+            from app.core.atr_hardening import harden_rule_engine
+
+            self.engine, self.remediation_receipts = harden_rule_engine(self.engine)
+            self.rule_count = len(self.engine.rules)
 
     @classmethod
     def from_settings(cls, settings: Any) -> ThreatDetector:
@@ -222,13 +228,14 @@ class ThreatDetector:
             configured_action = str(
                 action_map.get(match.severity, "block" if block_candidate else "detect")
             )
-            action = (
+            candidate_action = (
                 configured_action
-                if mode == "blocking"
+                if mode in {"shadow", "blocking"}
                 and match.rule_id not in excluded_rule_ids
                 and (not enabled_rule_ids or match.rule_id in enabled_rule_ids)
                 else "detect"
             )
+            action = candidate_action if mode == "blocking" else "detect"
             if action not in ALLOWED_BOUNDARY_ACTIONS.get(boundary, frozenset({"detect"})):
                 action = "block"
             enforcement_status = {
@@ -246,6 +253,8 @@ class ThreatDetector:
                     "confidence": match.confidence,
                     "block_candidate": block_candidate,
                     "action": action,
+                    "policy_stage": mode,
+                    "shadow_action": candidate_action if mode == "shadow" else None,
                     "enforcement_action": enforcement_status,
                     "content_fingerprint": content_fingerprint,
                     "content_length": len(str(content)),

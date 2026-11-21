@@ -8,10 +8,16 @@ from typing import Any
 
 import regex as regex_module
 
+from app.core.atr_bundle_security import secure_bundle_manifest
 from app.core.threat_detection import SEVERITY_RANK, ThreatDetector
 
 
-def rule_bundle_manifest(detector: ThreatDetector, source_path: str) -> dict[str, Any]:
+def rule_bundle_manifest(
+    detector: ThreatDetector,
+    source_path: str,
+    *,
+    remediation_receipts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     rules: list[dict[str, Any]] = []
     seen: set[str] = set()
     errors: list[str] = []
@@ -100,6 +106,7 @@ def rule_bundle_manifest(detector: ThreatDetector, source_path: str) -> dict[str
             "invalid_conditions": invalid_conditions,
             "invalid_rule_ids": invalid_rule_ids,
             "blocking_eligible": not invalid_conditions,
+            "remediation_receipts": remediation_receipts or [],
         },
         "rules": rules,
     }
@@ -123,7 +130,12 @@ def load_rule_bundle(
         scan_retries=settings.atr_scan_retries,
         fingerprint_secret=settings.atr_fingerprint_secret,
     )
-    manifest = rule_bundle_manifest(detector, path)
+    manifest = rule_bundle_manifest(
+        detector,
+        path,
+        remediation_receipts=getattr(detector, "remediation_receipts", []),
+    )
+    secure_bundle_manifest(manifest, settings)
     if not manifest["validation_report"]["valid"]:
         raise ValueError(
             "ATR rule bundle validation failed: "

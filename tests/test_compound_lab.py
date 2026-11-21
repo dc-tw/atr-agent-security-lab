@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 
 # ruff: noqa: E501, I001 -- long API fixtures are kept inline with bound approval fields.
 from pathlib import Path
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
-from app.lab_services import compound_runner, identity_broker
+from app.lab_services import compound_runner, failure_proxy, identity_broker
 from app.lab_services.compound_policy import (
     evaluate_deployment,
     evaluate_iam,
@@ -255,3 +258,131 @@ def test_stale_approval_returns_conflict(monkeypatch, tmp_path: Path) -> None:
         },
     )
     assert response.status_code == 409
+
+
+@pytest.mark.parametrize("kind", ["policy", "bundle", "artifact", "credential", "payload"])
+def test_every_security_mutation_invalidates_pending_approval(
+    monkeypatch, tmp_path: Path, kind: str
+) -> None:
+    client = _client(monkeypatch, tmp_path)
+    run = client.post(
+        "/compound-runs",
+        headers=ADMIN,
+        json={"scenario_id": "benign", "control_profile": "protected"},
+    ).json()
+    approval = next(
+        item for item in run["approvals"] if item["required_role"] == "security_reviewer"
+    )
+    mutated = client.post(
+        f"/compound-runs/{run['run_id']}/mutations",
+        headers=ADMIN,
+        json={"kind": kind},
+    )
+    assert mutated.status_code == 200
+    response = client.post(
+        f"/compound-runs/{run['run_id']}/approvals/{approval['approval_id']}",
+        headers={
+            "x-atr-lab-token": TOKEN,
+            "x-lab-subject": "security-reviewer",
+            "x-lab-device-id": "device-security",
+        },
+        json={
+            "decision": "approve",
+            "content_fingerprint": approval["content_fingerprint"],
+            "policy_version": approval["policy_version"],
+        },
+    )
+    assert response.status_code == 409
+
+
+def test_independent_reviewer_assignments_are_blinded_and_metrics_are_computed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    client = _client(monkeypatch, tmp_path)
+    reviewer_headers = {
+        "corpus-reviewer-a": "device-review-a",
+        "corpus-reviewer-b": "device-review-b",
+    }
+    assignments = client.get(
+        "/review-cases/assignments",
+        headers={"x-atr-lab-token": TOKEN, "x-lab-subject": "corpus-reviewer-a"},
+    ).json()
+    assert assignments["blinded"] is True
+    assert assignments["assignments"]
+    assert all("expected_verdict" not in item for item in assignments["assignments"])
+    for subject, device in reviewer_headers.items():
+        current = client.get(
+            "/review-cases/assignments",
+            headers={"x-atr-lab-token": TOKEN, "x-lab-subject": subject},
+        ).json()["assignments"]
+        for item in current:
+            verdict = (
+                "true_positive"
+                if item["case_id"] in {"request-canary", "tool-credential", "response-remote"}
+                else "false_positive"
+            )
+            submitted = client.post(
+                f"/review-cases/{item['case_id']}/reviews",
+                headers={
+                    "x-atr-lab-token": TOKEN,
+                    "x-lab-subject": subject,
+                    "x-lab-device-id": device,
+                },
+                json={"verdict": verdict, "reason": "independent fixture review"},
+            )
+            assert submitted.status_code == 200
+    results = client.get("/review-cases/results", headers=ADMIN).json()
+    assert results["metrics"] == {
+        "completed": 5,
+        "agreement_rate": 1.0,
+        "cohens_kappa": 1.0,
+    }
+    assert results["disagreements"] == []
+
+
+def test_failure_proxy_fault_mode_is_admin_controlled(monkeypatch) -> None:
+    monkeypatch.setenv("ATR_LAB_INTERNAL_TOKEN", TOKEN)
+    client = TestClient(failure_proxy.app)
+    assert client.put(
+        "/control/deployment",
+        headers={"x-atr-lab-token": TOKEN},
+        json={"mode": "status_503"},
+    ).json() == {"target": "deployment", "mode": "status_503"}
+    response = client.get("/proxy/deployment/healthz", headers={"x-atr-lab-token": TOKEN})
+    assert response.status_code == 503
+
+
+def test_failure_proxy_forwards_json_content_type(monkeypatch) -> None:
+    monkeypatch.setenv("ATR_LAB_INTERNAL_TOKEN", TOKEN)
+    captured: dict[str, object] = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured["content_type"] = request.headers.get("content-type")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"deployment_id": 1})
+
+    transport = httpx.MockTransport(handler)
+    async_client = httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        return async_client(transport=transport)
+
+    monkeypatch.setattr(failure_proxy.httpx, "AsyncClient", client_factory)
+    failure_proxy.MODES["deployment"] = "normal"
+    client = TestClient(failure_proxy.app)
+    response = client.post(
+        "/proxy/deployment/compound-deployments",
+        headers={"x-atr-lab-token": TOKEN},
+        json={"run_id": "run-1"},
+    )
+    assert response.status_code == 200
+    assert captured == {
+        "content_type": "application/json",
+        "body": {"run_id": "run-1"},
+    }
+    reset = client.put(
+        "/control/deployment",
+        headers={"x-atr-lab-token": TOKEN},
+        json={"mode": "normal"},
+    )
+    assert reset.status_code == 200

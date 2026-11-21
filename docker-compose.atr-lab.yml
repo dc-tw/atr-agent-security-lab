@@ -3,7 +3,7 @@ name: ai-ops-gateway-atr-lab
 x-gateway-environment: &gateway-environment
   APP_ENV: development
   API_KEY: ${ATR_LAB_API_KEY:-atr-lab-admin}
-  API_KEYS_JSON: '{"atr-lab-admin":{"subject":"lab-admin","tenant_id":"atr-lab","role":"admin"},"engineer-a-key":{"subject":"engineer-a","tenant_id":"atr-lab","role":"operator"},"security-reviewer-key":{"subject":"security-reviewer","tenant_id":"atr-lab","role":"operator"},"operations-reviewer-key":{"subject":"operations-reviewer","tenant_id":"atr-lab","role":"operator"},"wallet-approver-key":{"subject":"wallet-approver","tenant_id":"atr-lab","role":"operator"}}'
+  API_KEYS_JSON: '{"atr-lab-admin":{"subject":"lab-admin","tenant_id":"atr-lab","role":"admin"},"engineer-a-key":{"subject":"engineer-a","tenant_id":"atr-lab","role":"operator"},"security-reviewer-key":{"subject":"security-reviewer","tenant_id":"atr-lab","role":"operator"},"operations-reviewer-key":{"subject":"operations-reviewer","tenant_id":"atr-lab","role":"operator"},"wallet-approver-key":{"subject":"wallet-approver","tenant_id":"atr-lab","role":"operator"},"corpus-reviewer-a-key":{"subject":"corpus-reviewer-a","tenant_id":"atr-lab","role":"operator"},"corpus-reviewer-b-key":{"subject":"corpus-reviewer-b","tenant_id":"atr-lab","role":"operator"}}'
   REDIS_URL: redis://redis:6379/0
   DATABASE_URL: postgresql://gateway:gateway@postgres:5432/gateway
   LLM_BASE_URL: http://mock-model:8080/v1
@@ -16,10 +16,14 @@ x-gateway-environment: &gateway-environment
   ATR_LAB_ARTIFACT_URL: http://artifact-registry:8040
   ATR_LAB_SIGNING_URL: http://signing-simulator:8050
   ATR_LAB_COMPOUND_URL: http://compound-runner:8060
+  ATR_LAB_FAILURE_PROXY_URL: http://failure-proxy:8070
   ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
   ATR_LAB_ARTIFACTS_DIR: /var/lib/atr-lab/artifacts
   ATR_ENABLED: "true"
   ATR_BLOCKING: "false"
+  ATR_CALIBRATION_MIN_REVIEWS: "2"
+  ATR_PROMOTION_MIN_REVIEWERS: "2"
+  ATR_PROMOTION_MIN_KAPPA: "0.8"
   ATR_JSONL_PATH: /var/log/ai-gateway/atr-siem.jsonl
 
 services:
@@ -38,6 +42,7 @@ services:
       artifact-registry: {condition: service_healthy}
       signing-simulator: {condition: service_healthy}
       compound-runner: {condition: service_healthy}
+      failure-proxy: {condition: service_healthy}
       mock-model: {condition: service_healthy}
       siem-init: {condition: service_completed_successfully}
     volumes:
@@ -181,8 +186,8 @@ services:
     environment:
       ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
       ATR_LAB_COMPOUND_DB: /data/compound.sqlite3
-      ATR_LAB_DEPLOYMENT_URL: http://deployment-simulator:8030
-      ATR_LAB_SIGNING_URL: http://signing-simulator:8050
+      ATR_LAB_DEPLOYMENT_URL: http://failure-proxy:8070/proxy/deployment
+      ATR_LAB_SIGNING_URL: http://failure-proxy:8070/proxy/signing
     expose: ["8060"]
     depends_on:
       compound-data-init: {condition: service_completed_successfully}
@@ -190,9 +195,33 @@ services:
       artifact-registry: {condition: service_healthy}
       deployment-simulator: {condition: service_healthy}
       signing-simulator: {condition: service_healthy}
+      failure-proxy: {condition: service_healthy}
     volumes: [compound-data:/data]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/healthz', timeout=3)"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    networks: [lab]
+
+  failure-proxy:
+    image: ai-ops-gateway-atr-lab:local
+    command: ["uvicorn", "app.lab_services.failure_proxy:app", "--host", "0.0.0.0", "--port", "8070"]
+    environment:
+      ATR_LAB_INTERNAL_TOKEN: ${ATR_LAB_INTERNAL_TOKEN:-development-only-change-me}
+      ATR_LAB_PROXY_DEPLOYMENT_UPSTREAM: http://deployment-simulator:8030
+      ATR_LAB_PROXY_SIGNING_UPSTREAM: http://signing-simulator:8050
+    expose: ["8070"]
+    ports: ["127.0.0.1:8070:8070"]
+    depends_on:
+      deployment-simulator: {condition: service_healthy}
+      signing-simulator: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/healthz', timeout=3)"]
       interval: 3s
       timeout: 3s
       retries: 20

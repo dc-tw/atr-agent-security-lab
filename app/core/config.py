@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     atr_lab_artifact_url: str = "http://artifact-registry:8040"
     atr_lab_signing_url: str = "http://signing-simulator:8050"
     atr_lab_compound_url: str = "http://compound-runner:8060"
+    atr_lab_failure_proxy_url: str = "http://failure-proxy:8070"
     atr_lab_internal_token: str = "development-only-change-me"
     atr_lab_artifacts_dir: str = "/var/lib/atr-lab/artifacts"
     autonomous_tool_planning: bool = True
@@ -91,8 +92,15 @@ class Settings(BaseSettings):
     atr_findings_max_records: int = Field(default=10_000, ge=100, le=100_000)
     atr_calibration_min_reviews: int = Field(default=20, ge=1, le=10_000)
     atr_calibration_max_false_positive_rate: float = Field(default=0.05, ge=0, le=1)
+    atr_promotion_max_false_negative_rate: float = Field(default=0.0, ge=0, le=1)
+    atr_promotion_min_reviewers: int = Field(default=2, ge=2, le=10)
+    atr_promotion_min_kappa: float = Field(default=0.8, ge=-1, le=1)
     atr_scan_retries: int = Field(default=2, ge=0, le=5)
     atr_fingerprint_secret: str = "development-only-change-me"
+    atr_bundle_signing_private_key_path: str = ""
+    atr_bundle_trusted_public_key_path: str = ""
+    atr_bundle_require_signature: bool = False
+    atr_bundle_revoked_key_sha256: Annotated[list[str], NoDecode] = Field(default_factory=list)
     atr_export_encryption_secret: str = "development-only-change-me"
     atr_export_poll_seconds: float = Field(default=2.0, ge=0.1, le=60)
     atr_export_max_attempts: int = Field(default=8, ge=1, le=50)
@@ -113,7 +121,12 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
-    @field_validator("atr_blocking_rule_ids", "atr_blocking_excluded_rule_ids", mode="before")
+    @field_validator(
+        "atr_blocking_rule_ids",
+        "atr_blocking_excluded_rule_ids",
+        "atr_bundle_revoked_key_sha256",
+        mode="before",
+    )
     @classmethod
     def split_atr_rule_ids(cls, value: object) -> object:
         if isinstance(value, str):

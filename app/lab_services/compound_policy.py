@@ -20,6 +20,16 @@ IDENTITIES: dict[str, dict[str, str]] = {
         "resource": "review",
     },
     "wallet-approver": {"role": "wallet_approver", "device": "device-wallet", "resource": "review"},
+    "corpus-reviewer-a": {
+        "role": "corpus_reviewer",
+        "device": "device-review-a",
+        "resource": "review",
+    },
+    "corpus-reviewer-b": {
+        "role": "corpus_reviewer",
+        "device": "device-review-b",
+        "resource": "review",
+    },
     "lab-admin": {"role": "lab_admin", "device": "device-admin", "resource": "admin"},
 }
 

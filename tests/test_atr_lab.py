@@ -91,6 +91,22 @@ def test_policy_rejects_actions_that_are_invalid_for_a_boundary() -> None:
         ATRPolicyWrite(mode="blocking", boundary_action_map=mapping)
 
 
+def test_shadow_policy_records_would_enforce_without_blocking() -> None:
+    detector = ThreatDetector(engine=MarkerEngine("request_input"))
+    policy = boundary_policy("request_input", "block")
+    policy["mode"] = "shadow"
+    scan = detector.scan(
+        "hostile request",
+        event_type="request_input",
+        location="test:shadow",
+        policy=policy,
+    )
+    assert scan.blocked is False
+    assert scan.findings[0]["action"] == "detect"
+    assert scan.findings[0]["shadow_action"] == "block"
+    assert scan.findings[0]["policy_stage"] == "shadow"
+
+
 def test_invalid_rule_condition_is_disabled_and_reported() -> None:
     condition = lambda value: SimpleNamespace(  # noqa: E731 - compact rule fixture
         field="content", operator="regex", value=value

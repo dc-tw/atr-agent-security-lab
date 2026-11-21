@@ -22,7 +22,7 @@ ATRAction = Literal["detect", "block", "quarantine", "require_approval"]
 
 
 class ATRPolicyWrite(BaseModel):
-    mode: Literal["detection_only", "blocking"] = "detection_only"
+    mode: Literal["detection_only", "shadow", "blocking"] = "detection_only"
     minimum_severity: Severity = "medium"
     block_severity: Literal["low", "medium", "high", "critical"] = "high"
     action_map: dict[Severity, ATRAction] = Field(
@@ -78,6 +78,21 @@ class ATRPolicyWrite(BaseModel):
 class ATRExemptionWrite(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
     valid_for_minutes: int = Field(default=60, ge=1, le=10_080)
+
+
+class ATRRulePromotionMetric(BaseModel):
+    reviewed_samples: int = Field(ge=0)
+    false_positive_rate: float = Field(ge=0, le=1)
+    false_negative_rate: float = Field(ge=0, le=1)
+
+
+class ATRPromotionWrite(BaseModel):
+    source_version: int = Field(ge=0)
+    target_mode: Literal["shadow", "blocking"]
+    bundle_checksum: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    reviewer_count: int = Field(ge=0)
+    cohens_kappa: float = Field(ge=-1, le=1)
+    rule_metrics: dict[str, ATRRulePromotionMetric] = Field(min_length=1, max_length=2_000)
 
 
 class ATRExportSinkWrite(BaseModel):
@@ -207,6 +222,91 @@ async def rollback_policy(version: int, request: Request) -> dict[str, Any]:
         },
     )
     return policy
+
+
+@router.post("/policies/promote")
+async def promote_policy(payload: ATRPromotionWrite, request: Request) -> dict[str, Any]:
+    principal = await authorize(request, "admin")
+    runtime = _runtime(request)
+    current = await runtime.get_active_atr_policy(principal.tenant_id)
+    if current is None:
+        current = _default_policy(request, principal.tenant_id)
+    expected_transition = {
+        "detection_only": "shadow",
+        "shadow": "blocking",
+    }.get(str(current["mode"]))
+    if (
+        int(current["version"]) != payload.source_version
+        or expected_transition != payload.target_mode
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "invalid_atr_promotion_transition",
+                "current_version": current["version"],
+                "current_mode": current["mode"],
+                "required_target": expected_transition,
+            },
+        )
+    manifest = request.app.state.atr_bundle_manifest
+    if payload.bundle_checksum != manifest.get("checksum"):
+        raise HTTPException(
+            status_code=409, detail="ATR bundle changed; promotion evidence is stale"
+        )
+    health = manifest.get("validation_report", {})
+    if not health.get("blocking_eligible"):
+        raise HTTPException(status_code=409, detail="ATR bundle is not blocking eligible")
+    settings = request.app.state.settings
+    failures: dict[str, list[str]] = {}
+    for rule_id, metric in payload.rule_metrics.items():
+        reasons = []
+        if metric.reviewed_samples < settings.atr_calibration_min_reviews:
+            reasons.append("insufficient_reviewed_samples")
+        if metric.false_positive_rate > settings.atr_calibration_max_false_positive_rate:
+            reasons.append("false_positive_rate_exceeded")
+        if metric.false_negative_rate > settings.atr_promotion_max_false_negative_rate:
+            reasons.append("false_negative_rate_exceeded")
+        if reasons:
+            failures[rule_id] = reasons
+    if payload.reviewer_count < settings.atr_promotion_min_reviewers:
+        failures["_reviewers"] = ["insufficient_independent_reviewers"]
+    if payload.cohens_kappa < settings.atr_promotion_min_kappa:
+        failures["_agreement"] = ["cohens_kappa_below_threshold"]
+    if failures:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "atr_promotion_evidence_rejected", "failures": failures},
+        )
+    policy_payload = {
+        "mode": payload.target_mode,
+        "minimum_severity": current["minimum_severity"],
+        "block_severity": current["block_severity"],
+        "action_map": current["action_map"],
+        "boundary_action_map": current["boundary_action_map"],
+        "enabled_rule_ids": sorted(payload.rule_metrics),
+        "excluded_rule_ids": current["excluded_rule_ids"],
+    }
+    promoted = await runtime.create_atr_policy(
+        principal.tenant_id,
+        policy_payload,
+        created_by=principal.subject,
+    )
+    await runtime.append_audit(
+        principal.tenant_id,
+        {
+            "action": "atr.policy.promote",
+            "status": "completed",
+            "subject": principal.subject,
+            "source_version": payload.source_version,
+            "policy_version": promoted["version"],
+            "target_mode": payload.target_mode,
+            "bundle_checksum": payload.bundle_checksum,
+            "reviewer_count": payload.reviewer_count,
+            "cohens_kappa": payload.cohens_kappa,
+            "promoted_rule_ids": sorted(payload.rule_metrics),
+        },
+    )
+    return promoted
 
 
 @router.get("/receipts")

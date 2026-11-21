@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-ops-gateway"
-version = "0.3.0+compound.lab"
+version = "0.5.0+atr.rule.hardening"
 description = "Enterprise local-LLM operations and data processing gateway"
 readme = "README.md"
 requires-python = ">=3.11"
